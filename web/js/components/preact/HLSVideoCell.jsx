@@ -10,7 +10,7 @@ import { LoadingIndicator } from './LoadingIndicator.jsx';
 import { showStatusMessage } from './ToastContainer.jsx';
 import { PTZControls } from './PTZControls.jsx';
 import { ConfirmDialog } from './UI.jsx';
-import { getGo2rtcBaseUrl, isGo2rtcAvailable, isGo2rtcEnabled, isForceNativeHls } from '../../utils/settings-utils.js';
+import { getGo2rtcBaseUrl, getGo2rtcBaseUrlSync, isGo2rtcAvailable, isGo2rtcEnabled, isForceNativeHls } from '../../utils/settings-utils.js';
 import { forceNavigation } from '../../utils/navigation-utils.js';
 import { formatUtils } from './recordings/formatUtils.js';
 import { useI18n } from '../../i18n.js';
@@ -211,8 +211,8 @@ export function HLSVideoCell({
             go2rtcBaseUrl = await getGo2rtcBaseUrl();
             console.log(`Using go2rtc base URL for HLS: ${go2rtcBaseUrl}`);
           } catch (err) {
-            console.warn('Failed to get go2rtc URL from settings, using origin proxy:', err);
-            go2rtcBaseUrl = `${window.location.origin}/go2rtc`;
+            console.warn('Failed to get go2rtc URL from settings, using default port:', err);
+            go2rtcBaseUrl = getGo2rtcBaseUrlSync();
           }
 
           if (!isMounted) return;

@@ -78,8 +78,8 @@ export async function getGo2rtcApiPort() {
  * Over HTTPS: Routes through external reverse proxy at /go2rtc/* which forwards
  * to go2rtc.
  *
- * Over HTTP (local dev): lightNVR's built-in /go2rtc/* proxy is preferred for
- * API endpoints, while direct port access is used when bypassing the web server.
+ * Over HTTP: go2rtc is reached directly on its own port (default 1984); camera
+ * media never goes through lightNVR's /go2rtc/* proxy.
  *
  * @returns {Promise<string>} - go2rtc base URL (e.g., "https://hostname/go2rtc" or "http://hostname:1984/go2rtc")
  */
@@ -93,6 +93,22 @@ export async function getGo2rtcBaseUrl() {
   // Over HTTP (local dev), connect directly to go2rtc's port
   // keep behavior compatible with local setups that bypass the web reverse proxy
   const port = await getGo2rtcApiPort();
+  return `http://${window.location.hostname}:${port}/go2rtc`;
+}
+
+/**
+ * Synchronous variant of getGo2rtcBaseUrl() for callers that cannot await,
+ * such as <img src> snapshot URLs. Uses the cached settings port when it has
+ * been loaded, otherwise the default 1984.
+ *
+ * @returns {string} - go2rtc base URL
+ */
+export function getGo2rtcBaseUrlSync() {
+  if (window.location.protocol === 'https:') {
+    return `${window.location.origin}/go2rtc`;
+  }
+
+  const port = settingsCache?.go2rtc_api_port || 1984;
   return `http://${window.location.hostname}:${port}/go2rtc`;
 }
 

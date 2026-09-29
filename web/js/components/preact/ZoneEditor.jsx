@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect } from 'preact/hooks';
-import { getGo2rtcBaseUrl } from '../../utils/settings-utils.js';
+import { getGo2rtcBaseUrl, getGo2rtcBaseUrlSync } from '../../utils/settings-utils.js';
 import { nowMilliseconds } from '../../utils/date-utils.js';
 import { useI18n } from '../../i18n.js';
 
@@ -54,7 +54,7 @@ export function ZoneEditor({ streamName, zones = [], onZonesChange, onClose }) {
   // Load snapshot for the stream
   useEffect(() => {
     if (streamName) {
-      // Use go2rtc's snapshot API endpoint via lightNVR reverse proxy
+      // Use go2rtc's snapshot API endpoint directly on its own port
       const loadSnapshot = async () => {
         try {
           const go2rtcBaseUrl = await getGo2rtcBaseUrl();
@@ -64,9 +64,9 @@ export function ZoneEditor({ streamName, zones = [], onZonesChange, onClose }) {
           console.log('Loading snapshot from:', url);
           setSnapshotUrl(url);
         } catch (err) {
-          console.warn('Failed to get go2rtc URL, using origin proxy:', err);
+          console.warn('Failed to get go2rtc URL, using default port:', err);
           const timestamp = nowMilliseconds();
-          const url = `${window.location.origin}/go2rtc/api/frame.jpeg?src=${encodeURIComponent(streamName)}&t=${timestamp}`;
+          const url = `${getGo2rtcBaseUrlSync()}/api/frame.jpeg?src=${encodeURIComponent(streamName)}&t=${timestamp}`;
           setSnapshotUrl(url);
         }
       };

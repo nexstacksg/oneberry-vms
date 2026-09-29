@@ -2,6 +2,7 @@ import {
   getStoredStreamQuality,
   getStreamQualitySource,
 } from './stream-quality-utils.js';
+import { getGo2rtcBaseUrlSync } from './settings-utils.js';
 
 const WARMUP_THROTTLE_MS = 5000;
 const WARMUP_TIMEOUT_MS = 3000;
@@ -51,7 +52,7 @@ export function buildGo2rtcSnapshotUrl(streamSource, cache = '30s') {
     cache,
   });
 
-  return `/go2rtc/api/frame.jpeg?${params.toString()}`;
+  return `${getGo2rtcBaseUrlSync()}/api/frame.jpeg?${params.toString()}`;
 }
 
 export function startLiveWarmup({ force = false } = {}) {

@@ -56,24 +56,16 @@ const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 let iceServersCache = null;
 let iceServersInflight = null;
-let configuredGo2rtcBaseUrlInflight = null;
+let go2rtcBaseUrlInflight = null;
 const fullscreenSegmentCache = new Map();
 const fullscreenPlaybackWarmups = new Map();
 
-function getSameOriginGo2rtcBaseUrl() {
-  return `${window.location.origin}/go2rtc`;
-}
-
-async function getConfiguredGo2rtcBaseUrlCached() {
-  if (!configuredGo2rtcBaseUrlInflight) {
-    configuredGo2rtcBaseUrlInflight = getGo2rtcBaseUrl()
-      .catch((err) => {
-        console.warn('Failed to get configured go2rtc URL from settings, using same-origin proxy:', err);
-        return getSameOriginGo2rtcBaseUrl();
-      });
+async function getGo2rtcBaseUrlCached() {
+  if (!go2rtcBaseUrlInflight) {
+    go2rtcBaseUrlInflight = getGo2rtcBaseUrl();
   }
 
-  return configuredGo2rtcBaseUrlInflight;
+  return go2rtcBaseUrlInflight;
 }
 
 function primeIceServersCache() {
@@ -1192,15 +1184,18 @@ export function WebRTCVideoCell({
     let videoDataTimeout = null;
     let initDelayTimeout = null;
     let go2rtcBaseUrl = null;
+    let disposed = false;
 
     // Async function to initialize WebRTC
     const initWebRTC = async () => {
-      // Start with the same-origin HTTP proxy. This avoids waiting on
-      // /api/settings for every visible camera before WebRTC negotiation can
-      // begin; if a deployment needs the configured direct URL, offer retry
-      // falls back to it below.
-      go2rtcBaseUrl = getSameOriginGo2rtcBaseUrl();
-      console.log(`Using initial go2rtc base URL: ${go2rtcBaseUrl}`);
+      // Signal go2rtc directly on its own port (http://host:1984/go2rtc) rather
+      // than through lightNVR's /go2rtc proxy. The URL is resolved once and
+      // shared by all cells, so /api/settings is fetched only once.
+      go2rtcBaseUrl = await getGo2rtcBaseUrlCached();
+      // The cell may have unmounted while the URL was resolving; creating a
+      // peer connection now would leak it past cleanup.
+      if (disposed) return;
+      console.log(`Using go2rtc base URL: ${go2rtcBaseUrl}`);
 
       // Fetch ICE server configuration from API (includes TURN if configured)
       const iceServers = getIceServersForStartup();
@@ -1660,7 +1655,7 @@ export function WebRTCVideoCell({
           return offerError;
         };
 
-        const sendOfferWithRetry = async (attempt, baseUrl = go2rtcBaseUrl, triedConfiguredFallback = false) => {
+        const sendOfferWithRetry = async (attempt) => {
           let response;
           const offerAbortController = new AbortController();
           abortControllerRef.current = offerAbortController;
@@ -1668,7 +1663,7 @@ export function WebRTCVideoCell({
             offerAbortController.abort();
           }, WEBRTC_OFFER_TIMEOUT_MS);
           try {
-            response = await fetch(`${baseUrl}/api/webrtc?src=${encodeURIComponent(activeStreamSource)}`, {
+            response = await fetch(`${go2rtcBaseUrl}/api/webrtc?src=${encodeURIComponent(activeStreamSource)}`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/sdp',
@@ -1681,14 +1676,7 @@ export function WebRTCVideoCell({
               const delay = getJitteredOfferRetryDelay(getOfferRetryDelay(attempt));
               console.warn(`go2rtc offer request failed for stream ${stream.name} (attempt ${attempt + 1}/${maxOfferRetries + 1}), retrying in ${delay}ms...`, fetchError);
               await new Promise(resolve => setTimeout(resolve, delay));
-              return sendOfferWithRetry(attempt + 1, baseUrl, triedConfiguredFallback);
-            }
-            if (!triedConfiguredFallback && baseUrl === getSameOriginGo2rtcBaseUrl()) {
-              const configuredBaseUrl = await getConfiguredGo2rtcBaseUrlCached();
-              if (configuredBaseUrl !== baseUrl) {
-                console.warn(`go2rtc proxy request failed for ${stream.name} after retries; retrying configured URL ${configuredBaseUrl}`, fetchError);
-                return sendOfferWithRetry(0, configuredBaseUrl, true);
-              }
+              return sendOfferWithRetry(attempt + 1);
             }
             fetchError.retryableOfferFailure = true;
             throw fetchError;
@@ -1703,19 +1691,7 @@ export function WebRTCVideoCell({
               const delay = getJitteredOfferRetryDelay(getOfferRetryDelay(attempt));
               console.warn(`go2rtc returned ${response.status} for stream ${stream.name} (attempt ${attempt + 1}/${maxOfferRetries + 1}), retrying in ${delay}ms...`);
               await new Promise(resolve => setTimeout(resolve, delay));
-              return sendOfferWithRetry(attempt + 1, baseUrl, triedConfiguredFallback);
-            }
-            if (
-              !triedConfiguredFallback &&
-              response.status >= 400 &&
-              response.status !== 404 &&
-              baseUrl === getSameOriginGo2rtcBaseUrl()
-            ) {
-              const configuredBaseUrl = await getConfiguredGo2rtcBaseUrlCached();
-              if (configuredBaseUrl !== baseUrl) {
-                console.warn(`go2rtc proxy returned ${response.status} for ${stream.name} after retries; retrying configured URL ${configuredBaseUrl}`);
-                return sendOfferWithRetry(0, configuredBaseUrl, true);
-              }
+              return sendOfferWithRetry(attempt + 1);
             }
             console.error(`go2rtc /api/webrtc error for stream ${stream.name}: status=${response.status}, body="${bodyText}"`);
             // Check whether the go2rtc error body indicates the camera source is
@@ -1876,6 +1852,7 @@ export function WebRTCVideoCell({
     // Cleanup function
     const cleanupWebRTCResources = () => {
       console.log(`Cleaning up WebRTC connection for stream ${stream.name}`);
+      disposed = true;
 
       // Clear timeouts
       if (initDelayTimeout) {
