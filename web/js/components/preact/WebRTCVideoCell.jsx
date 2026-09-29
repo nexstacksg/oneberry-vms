@@ -1487,36 +1487,15 @@ export function WebRTCVideoCell({
           connectionMonitorRef.current = null;
         }
 
-        // Auto-refresh and retry if we haven't already for this connection attempt
+        // Retry the connection if we haven't already for this attempt. ICE
+        // failure is a network problem between this browser and go2rtc, so
+        // the go2rtc registration is not refreshed: re-registering cannot fix
+        // it and would drop the recording and every other viewer.
         if (!connectionRefreshRequestedRef.current && reconnectAttemptsRef.current < 3) {
           connectionRefreshRequestedRef.current = true;
           reconnectAttemptsRef.current++;
-          console.log(`Auto-refreshing go2rtc registration for stream ${stream.name} (attempt ${reconnectAttemptsRef.current}/3)`);
-
-          // Trigger a refresh and retry automatically
-          (async () => {
-            try {
-              const response = await fetch(`/api/streams/${encodeURIComponent(stream.name)}/refresh`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-              });
-              if (response.ok) {
-                console.log(`Successfully refreshed go2rtc registration for ${stream.name}, retrying connection...`);
-                // Brief pause to allow go2rtc to fully process the refresh
-                await new Promise(resolve => setTimeout(resolve, 800));
-                // Trigger a retry by incrementing retryCount
-                setRetryCount(prev => prev + 1);
-                return;
-              } else {
-                console.warn(`Failed to refresh stream ${stream.name}: ${response.status}`);
-              }
-            } catch (err) {
-              console.error(`Error refreshing stream ${stream.name}:`, err);
-            }
-            // If refresh failed, show the error
-            setError(t('live.webrtcIceConnectionFailed'));
-            setIsLoading(false);
-          })();
+          console.log(`Retrying WebRTC connection for stream ${stream.name} (attempt ${reconnectAttemptsRef.current}/3)`);
+          setTimeout(() => setRetryCount(prev => prev + 1), 800);
         } else {
           setError(t('live.webrtcIceConnectionFailed'));
           setIsLoading(false);
@@ -1687,6 +1666,20 @@ export function WebRTCVideoCell({
           const bodyText = await response.text().catch(() => '');
 
           if (!response.ok) {
+            // go2rtc answers 500 "codecs not matched" when the source codec
+            // (e.g. an H.265 camera sub-stream) cannot be sent to this browser
+            // over WebRTC. That is permanent for this source: retrying the
+            // offer or refreshing the server-side registration cannot fix it,
+            // and a refresh would tear down recording and every other viewer.
+            if (/codecs not matched/i.test(bodyText)) {
+              console.error(`go2rtc cannot send stream ${activeStreamSource} to this browser over WebRTC: ${bodyText}`);
+              const codecMatch = bodyText.match(/video:(\w+)/);
+              throw createOfferError(
+                `Camera video codec${codecMatch ? ` (${codecMatch[1]})` : ''} is not supported by this browser over WebRTC. ` +
+                'Switch this camera to high quality, or set the camera sub-stream to H.264.',
+                false
+              );
+            }
             if (shouldRetryOfferStatus(response.status) && attempt < maxOfferRetries) {
               const delay = getJitteredOfferRetryDelay(getOfferRetryDelay(attempt));
               console.warn(`go2rtc returned ${response.status} for stream ${stream.name} (attempt ${attempt + 1}/${maxOfferRetries + 1}), retrying in ${delay}ms...`);
@@ -1702,10 +1695,12 @@ export function WebRTCVideoCell({
             if (isSourceUnreachable) {
               throw new Error(t('live.cannotConnectToSource'));
             }
-            throw createOfferError(
+            const offerError = createOfferError(
               `Failed to send offer: ${response.status} ${response.statusText}`,
               shouldRetryOfferStatus(response.status)
             );
+            offerError.offerStatus = response.status;
+            throw offerError;
           }
           return bodyText;
         };
@@ -1740,13 +1735,20 @@ export function WebRTCVideoCell({
           reconnectAttemptsRef.current < MAX_OFFER_FAILURE_RECONNECT_ATTEMPTS
         ) {
           reconnectAttemptsRef.current++;
+          // Only re-register when go2rtc says the stream is missing (404).
+          // A refresh deletes and re-adds the stream server-side, which drops
+          // the recording and every other viewer, so it must not be used for
+          // failures a re-registration cannot fix.
+          const needsRegistration = error.offerStatus === 404;
           console.log(
-            `Refreshing stream ${stream.name} after WebRTC offer failure ` +
+            `${needsRegistration ? 'Refreshing' : 'Retrying'} stream ${stream.name} after WebRTC offer failure ` +
             `(attempt ${reconnectAttemptsRef.current}/${MAX_OFFER_FAILURE_RECONNECT_ATTEMPTS})`
           );
           (async () => {
             try {
-              await refreshStreamRegistration();
+              if (needsRegistration) {
+                await refreshStreamRegistration();
+              }
               await new Promise(resolve => setTimeout(resolve, OFFER_FAILURE_REFRESH_DELAY_MS));
             } catch (refreshError) {
               console.error(`Error refreshing stream ${stream.name} after offer failure:`, refreshError);
