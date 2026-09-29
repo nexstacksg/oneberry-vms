@@ -218,6 +218,7 @@ typedef struct {
     char go2rtc_stun_server[256];         // Primary STUN server (default: stun.l.google.com:19302)
     char go2rtc_external_ip[64];          // Optional: External IP for NAT (empty = auto-detect)
     char go2rtc_ice_servers[512];         // Optional: Custom ICE servers (comma-separated)
+    char go2rtc_webrtc_transport[8];      // WebRTC media transport: "tcp", "udp" or "" (both, default)
 
     // TURN server settings for WebRTC relay (exposed to browser)
     bool turn_enabled;                    // Enable TURN relay (default: false)

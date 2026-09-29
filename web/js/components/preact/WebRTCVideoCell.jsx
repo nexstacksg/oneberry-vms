@@ -40,7 +40,7 @@ import {
 // time we will wait for video frames before surfacing an error.
 const MAX_VIDEO_DATA_CHECKS = 12; // 12 checks × 5,000 ms (5s) interval = 60s total
 const VIDEO_DATA_CHECK_INTERVAL_MS = 5000; // 5 seconds between checks
-const MIN_NO_DATA_CHECKS_BEFORE_RETRY = 1;
+const MIN_NO_DATA_CHECKS_BEFORE_RETRY = 6; // 6 checks × 5 s = 30 s, longer than a camera GOP
 const MAX_NO_DATA_RECONNECT_ATTEMPTS = 3;
 const MAX_OFFER_FAILURE_RECONNECT_ATTEMPTS = 2;
 const OFFER_RETRY_DELAYS_MS = [100, 200, 400, 750, 1000, 1500, 2000, 3000];
@@ -1355,16 +1355,10 @@ export function WebRTCVideoCell({
                   `after ${videoDataCheckCount * videoDataCheckInterval / 1000}s ` +
                   `(attempt ${noDataReconnectAttemptsRef.current}/${MAX_NO_DATA_RECONNECT_ATTEMPTS})`
                 );
-                (async () => {
-                  try {
-                    await refreshStreamRegistration();
-                    // Brief pause for go2rtc to re-register the RTSP source
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                  } catch (err) {
-                    console.error(`Error refreshing stream ${stream.name} during auto-reconnect:`, err);
-                  }
-                  setRetryCount(prev => prev + 1);
-                })();
+                // Reconnect this viewer only. Refreshing the go2rtc
+                // registration would drop the recording and every other
+                // viewer; the manual Retry button still does that.
+                setRetryCount(prev => prev + 1);
                 return; // Stop check chain; the retry useEffect run starts fresh
               }
 

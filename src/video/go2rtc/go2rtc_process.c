@@ -796,9 +796,18 @@ bool go2rtc_process_generate_config(const char *config_path, int api_port) {
         int webrtc_port = global_config->go2rtc_webrtc_listen_port > 0 ?
                           global_config->go2rtc_webrtc_listen_port : 8555;
 
+        // "tcp" or "udp" restricts WebRTC media to that transport; empty offers both
+        const char *webrtc_transport = global_config->go2rtc_webrtc_transport;
+        bool webrtc_single_transport = strcmp(webrtc_transport, "tcp") == 0 ||
+                                       strcmp(webrtc_transport, "udp") == 0;
+
         // WebRTC listen port
         if (webrtc_port > 0) {
-            fprintf(config_file, "  listen: \":%d\"\n", webrtc_port);
+            if (webrtc_single_transport) {
+                fprintf(config_file, "  listen: \":%d/%s\"\n", webrtc_port, webrtc_transport);
+            } else {
+                fprintf(config_file, "  listen: \":%d\"\n", webrtc_port);
+            }
         }
 
         // ICE servers configuration
@@ -876,6 +885,13 @@ bool go2rtc_process_generate_config(const char *config_path, int api_port) {
         // Add STUN server as candidate for ICE gathering
         if (global_config->go2rtc_stun_enabled) {
             fprintf(config_file, "    - \"stun:%s\"\n", global_config->go2rtc_stun_server);
+        }
+
+        // The listen suffix alone still lets pion gather host candidates of the
+        // other transport on random ports; the network filter removes them.
+        if (webrtc_single_transport) {
+            fprintf(config_file, "  filters:\n");
+            fprintf(config_file, "    networks: [%s4]\n", webrtc_transport);
         }
 
         fprintf(config_file, "\n");

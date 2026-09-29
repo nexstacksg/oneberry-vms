@@ -107,6 +107,7 @@ static const env_config_mapping_t env_config_mappings[] = {
     {"GO2RTC_EXTERNAL_IP",     CONFIG_TYPE_STRING, CONFIG_OFFSET(go2rtc_external_ip),       64,  "",   0, false},
     {"GO2RTC_ICE_SERVERS",     CONFIG_TYPE_STRING, CONFIG_OFFSET(go2rtc_ice_servers),       512, "",   0, false},
     {"GO2RTC_WEBRTC_LISTEN_PORT", CONFIG_TYPE_INT, CONFIG_OFFSET(go2rtc_webrtc_listen_port), 0,  NULL, 8555, false},
+    {"GO2RTC_WEBRTC_TRANSPORT", CONFIG_TYPE_STRING, CONFIG_OFFSET(go2rtc_webrtc_transport), 8, "",  0, false},
 
     // Web server settings
     {"WEB_PORT",           CONFIG_TYPE_INT,    CONFIG_OFFSET(web_port),           0,   NULL, 8080, false},
@@ -420,6 +421,7 @@ void load_default_config(config_t *config) {
     snprintf(config->go2rtc_stun_server, sizeof(config->go2rtc_stun_server), "stun.l.google.com:19302");
     config->go2rtc_external_ip[0] = '\0';  // Empty by default (auto-detect)
     config->go2rtc_ice_servers[0] = '\0';  // Empty by default (use STUN server)
+    config->go2rtc_webrtc_transport[0] = '\0';  // Empty = offer both UDP and TCP
 
     // TURN server settings for WebRTC relay (exposed to browser)
     config->turn_enabled = false;  // Disabled by default
@@ -888,6 +890,13 @@ static int config_ini_handler(void* user, const char* section, const char* name,
         } else if (strcmp(name, "ice_servers") == 0) {
             strncpy(config->go2rtc_ice_servers, value, sizeof(config->go2rtc_ice_servers) - 1);
             config->go2rtc_ice_servers[sizeof(config->go2rtc_ice_servers) - 1] = '\0';
+        } else if (strcmp(name, "webrtc_transport") == 0) {
+            // Only "tcp" and "udp" restrict the transport; anything else means both
+            if (strcmp(value, "tcp") == 0 || strcmp(value, "udp") == 0) {
+                snprintf(config->go2rtc_webrtc_transport, sizeof(config->go2rtc_webrtc_transport), "%s", value);
+            } else {
+                config->go2rtc_webrtc_transport[0] = '\0';
+            }
         } else if (strcmp(name, "force_native_hls") == 0) {
             config->go2rtc_force_native_hls = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
         } else if (strcmp(name, "proxy_max_inflight") == 0) {
@@ -1794,6 +1803,9 @@ int save_config(const config_t *config, const char *path) {
     }
     if (config->go2rtc_ice_servers[0] != '\0') {
         fprintf(file, "ice_servers = %s\n", config->go2rtc_ice_servers);
+    }
+    if (config->go2rtc_webrtc_transport[0] != '\0') {
+        fprintf(file, "webrtc_transport = %s\n", config->go2rtc_webrtc_transport);
     }
     fprintf(file, "force_native_hls = %s\n", config->go2rtc_force_native_hls ? "true" : "false");
     fprintf(file, "proxy_max_inflight = %d\n", config->go2rtc_proxy_max_inflight);
