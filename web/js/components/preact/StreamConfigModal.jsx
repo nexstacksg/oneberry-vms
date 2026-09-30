@@ -296,7 +296,7 @@ export function StreamConfigModal({
   onToggleSection,
   onInputChange,
   onThresholdChange,
-  onTestConnection,
+  onTestUrl,
   urlProbe = { status: 'idle' },
   onTestMotion,
   onSave,
@@ -556,34 +556,48 @@ export function StreamConfigModal({
                   <label htmlFor="stream-url" className="block text-sm font-medium mb-2">
                     {t('streamsConfig.streamUrl')} <span className="text-destructive">*</span>
                   </label>
-                  <input
-                    type="text"
-                    id="stream-url"
-                    name="url"
-                    className={`w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground ${hideCredentials ? 'cursor-not-allowed opacity-75' : ''}`}
-                    placeholder={t('streamsConfig.streamUrlPlaceholder')}
-                    value={hideCredentials ? obfuscateUrlCredentials(currentStream.url) : currentStream.url}
-                    onChange={onInputChange}
-                    required
-                    readOnly={hideCredentials}
-                    title={hideCredentials ? t('streamsConfig.urlCredentialsHiddenTitle') : ''}
-                  />
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      id="stream-url"
+                      name="url"
+                      className={`w-full min-w-0 px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground ${hideCredentials ? 'cursor-not-allowed opacity-75' : ''}`}
+                      placeholder={t('streamsConfig.streamUrlPlaceholder')}
+                      value={hideCredentials ? obfuscateUrlCredentials(currentStream.url) : currentStream.url}
+                      onChange={onInputChange}
+                      required
+                      readOnly={hideCredentials}
+                      title={hideCredentials ? t('streamsConfig.urlCredentialsHiddenTitle') : ''}
+                    />
+                    {!hideCredentials && (
+                      <button
+                        id="stream-url-test-btn"
+                        type="button"
+                        onClick={onTestUrl}
+                        disabled={!String(currentStream.url || '').trim() || urlProbe.status === 'detecting'}
+                        className="shrink-0 px-4 py-2 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Test the stream and fill in resolution, FPS and codec"
+                      >
+                        {urlProbe.status === 'detecting' ? 'Testing…' : 'Test'}
+                      </button>
+                    )}
+                  </div>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {hideCredentials ? t('streamsConfig.urlCredentialsHidden') : t('streamsConfig.rtspUrlHelp')}
                   </p>
                   {urlProbe.status === 'detecting' && (
                     <p className="mt-1 text-xs text-muted-foreground" data-testid="stream-url-probe">
-                      Detecting resolution and frame rate…
+                      Testing stream…
                     </p>
                   )}
                   {urlProbe.status === 'detected' && (
                     <p className="mt-1 text-xs text-green-600 dark:text-green-400" data-testid="stream-url-probe">
-                      Detected {urlProbe.summary || 'stream'}; resolution, FPS and codec were filled in.
+                      Stream OK: {urlProbe.summary || 'connected'}. Resolution, FPS and codec have been set.
                     </p>
                   )}
                   {urlProbe.status === 'failed' && (
                     <p className="mt-1 text-xs text-destructive" data-testid="stream-url-probe">
-                      Could not detect stream settings: {urlProbe.message}
+                      Stream test failed: {urlProbe.message}
                     </p>
                   )}
                 </div>
@@ -1768,14 +1782,6 @@ export function StreamConfigModal({
 
         {/* Footer */}
         <div className="stream-config-modal-footer">
-          <button
-            id="stream-test-btn"
-            type="button"
-            onClick={onTestConnection}
-            className="px-4 py-2 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80 transition-colors font-medium"
-          >
-            {t('streamsConfig.testConnection')}
-          </button>
           <div className="stream-config-modal-actions">
             <button
               id="stream-cancel-btn"

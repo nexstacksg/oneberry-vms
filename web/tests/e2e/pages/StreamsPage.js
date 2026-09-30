@@ -24,7 +24,7 @@ class StreamsPage {
   get streamRecordCheckbox() { return '#stream-record'; }
   get saveButton() { return '#stream-save-btn'; }
   get cancelButton() { return '#stream-cancel-btn'; }
-  get testConnectionButton() { return '#stream-test-btn'; }
+  get testConnectionButton() { return '#stream-url-test-btn'; }
 
   // Delete modal selectors
   get deleteModal() { return '[role="dialog"][aria-modal="true"][aria-labelledby="stream-delete-modal-title"]'; }

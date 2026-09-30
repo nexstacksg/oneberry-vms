@@ -580,9 +580,8 @@ export function StreamsView() {
     motionTriggerSource: ''
   });
   const [isEditing, setIsEditing] = useState(false);
-  // Auto-detection of resolution / fps / codec from the stream URL
+  // Result of the Test button next to the stream URL field
   const [urlProbe, setUrlProbe] = useState({ status: 'idle' });
-  const probedKeyRef = useRef('');
   const probeAbortRef = useRef(null);
   const [isCloning, setIsCloning] = useState(false);
 
@@ -671,35 +670,6 @@ export function StreamsView() {
       }
     }
   });
-
-  // Mutation for testing stream connection
-  const testStreamMutation = usePostMutation(
-    '/api/streams/test',
-    {
-      timeout: 20000,
-      retries: 1,
-      retryDelay: 2000
-    },
-    {
-      onMutate: () => {
-        showStatusMessage(t('streams.testingStreamConnection'));
-      },
-      onSuccess: (data) => {
-        if (data.success) {
-          if (data.info) {
-            const fields = applyDetectedStreamInfo(data.info);
-            setUrlProbe({ status: 'detected', summary: formatDetectedSummary(fields) });
-          }
-          showStatusMessage(t('streams.streamConnectionSuccessful'), 'success', 3000);
-        } else {
-          showStatusMessage(t('streams.streamConnectionFailed', { message: data.message }), 'error', 5000);
-        }
-      },
-      onError: (error) => {
-        showStatusMessage(t('streams.errorTestingStream', { message: error.message }), 'error', 5000);
-      }
-    }
-  );
 
   // Mutation for deleting stream
   const deleteStreamMutation = useMutation({
@@ -990,107 +960,81 @@ export function StreamsView() {
     });
   };
 
-  // What identifies one probe: the URL plus anything that changes how it connects
-  const getStreamProbeKey = (stream) => {
-    if (!isProbeableStreamUrl(stream?.url)) {
-      return '';
-    }
-    return JSON.stringify([
-      stream.url.trim(),
-      String(stream.protocol),
-      stream.isOnvif ? stream.onvifUsername || '' : '',
-      stream.isOnvif ? stream.onvifPassword || '' : '',
-    ]);
-  };
+  // What identifies one test: the URL plus anything that changes how it connects.
+  // A result is only shown while these still match, so editing the URL clears it.
+  const getStreamProbeKey = (stream) => JSON.stringify([
+    (stream?.url || '').trim(),
+    String(stream?.protocol),
+    stream?.isOnvif ? stream.onvifUsername || '' : '',
+    stream?.isOnvif ? stream.onvifPassword || '' : '',
+  ]);
 
-  const resetUrlProbe = (probedKey) => {
+  const resetUrlProbe = () => {
     probeAbortRef.current?.abort();
     probeAbortRef.current = null;
-    probedKeyRef.current = probedKey;
     setUrlProbe({ status: 'idle' });
   };
 
-  const applyDetectedStreamInfo = (info) => {
-    const fields = detectedInfoToFormFields(info);
-    if (Object.keys(fields).length > 0) {
-      setCurrentStream(prev => ({ ...prev, ...fields }));
-    }
-    return fields;
-  };
+  // Test button next to the stream URL: probe the stream and, if it can be
+  // read, fill in resolution, fps and codec from what the camera sends.
+  const testStreamUrl = async () => {
+    const url = (currentStream.url || '').trim();
+    const key = getStreamProbeKey(currentStream);
 
-  // Probe the stream once the user stops typing a complete RTSP URL, and fill
-  // in resolution, fps and codec. Each distinct URL is probed once; a newer
-  // URL cancels an older probe that is still running.
-  useEffect(() => {
-    if (!modalVisible || shouldHideCredentials) {
-      return undefined;
-    }
-    const probeKey = getStreamProbeKey(currentStream);
-    if (!probeKey || probeKey === probedKeyRef.current) {
-      return undefined;
+    if (!isProbeableStreamUrl(url)) {
+      setUrlProbe({
+        status: 'failed',
+        key,
+        message: 'Enter a complete RTSP URL, for example rtsp://user:password@192.168.1.10:554/stream',
+      });
+      return;
     }
 
-    const timer = setTimeout(async () => {
-      probeAbortRef.current?.abort();
-      const controller = new AbortController();
-      probeAbortRef.current = controller;
-      probedKeyRef.current = probeKey;
-      setUrlProbe({ status: 'detecting' });
+    probeAbortRef.current?.abort();
+    const controller = new AbortController();
+    probeAbortRef.current = controller;
+    setUrlProbe({ status: 'detecting', key });
 
-      try {
-        const data = await fetchJSON('/api/streams/test', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: currentStream.url.trim(),
-            protocol: parseInt(currentStream.protocol, 10),
-            onvif_username: currentStream.isOnvif ? currentStream.onvifUsername : undefined,
-            onvif_password: currentStream.isOnvif ? currentStream.onvifPassword : undefined,
-          }),
-          signal: controller.signal,
-          timeout: 20000,
-          retries: 0,
-        });
-        if (controller.signal.aborted) {
-          return;
-        }
-        if (data?.success && data.info) {
-          const fields = applyDetectedStreamInfo(data.info);
-          setUrlProbe({ status: 'detected', summary: formatDetectedSummary(fields) });
-        } else {
-          setUrlProbe({ status: 'failed', message: data?.message || 'Could not read the stream' });
-        }
-      } catch (error) {
-        if (!controller.signal.aborted) {
-          setUrlProbe({ status: 'failed', message: error.message });
-        }
-      } finally {
-        if (probeAbortRef.current === controller) {
-          probeAbortRef.current = null;
-        }
+    try {
+      const data = await fetchJSON('/api/streams/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url,
+          protocol: parseInt(currentStream.protocol, 10),
+          onvif_username: currentStream.isOnvif ? currentStream.onvifUsername : undefined,
+          onvif_password: currentStream.isOnvif ? currentStream.onvifPassword : undefined,
+        }),
+        signal: controller.signal,
+        timeout: 20000,
+        retries: 0,
+      });
+      if (controller.signal.aborted) {
+        return;
       }
-    }, 1000);
-
-    return () => clearTimeout(timer);
-  }, [
-    modalVisible,
-    shouldHideCredentials,
-    currentStream.url,
-    currentStream.protocol,
-    currentStream.isOnvif,
-    currentStream.onvifUsername,
-    currentStream.onvifPassword,
-  ]);
-
-  // Test stream connection
-  const testStreamConnection = () => {
-    testStreamMutation.mutate({
-      url: currentStream.url,
-      protocol: parseInt(currentStream.protocol, 10),
-      onvif_username: currentStream.isOnvif ? currentStream.onvifUsername : undefined,
-      onvif_password: currentStream.isOnvif ? currentStream.onvifPassword : undefined,
-    });
+      if (data?.success && data.info) {
+        const fields = detectedInfoToFormFields(data.info);
+        if (Object.keys(fields).length > 0) {
+          setCurrentStream(prev => ({ ...prev, ...fields }));
+        }
+        setUrlProbe({ status: 'detected', key, summary: formatDetectedSummary(fields) });
+      } else {
+        setUrlProbe({ status: 'failed', key, message: data?.message || 'Could not read the stream' });
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setUrlProbe({ status: 'failed', key, message: error.message });
+      }
+    } finally {
+      if (probeAbortRef.current === controller) {
+        probeAbortRef.current = null;
+      }
+    }
   };
+
+  const visibleUrlProbe = urlProbe.status !== 'idle' && urlProbe.key === getStreamProbeKey(currentStream)
+    ? urlProbe
+    : { status: 'idle' };
 
   // Trigger a simulated ONVIF motion event for the current stream
   const triggerTestMotionEvent = async () => {
@@ -1208,7 +1152,7 @@ export function StreamsView() {
       // Tags
       tags: ''
     });
-    resetUrlProbe('');
+    resetUrlProbe();
     setIsEditing(false);
     setIsCloning(false);
     setModalVisible(true);
@@ -1232,10 +1176,8 @@ export function StreamsView() {
       const stream = data.stream || {};
       const motion = data.motion_config || null;
 
-      const formState = buildStreamFormState(stream, motion);
-      setCurrentStream(formState);
-      // Editing keeps the saved values until the URL is changed
-      resetUrlProbe(getStreamProbeKey(formState));
+      setCurrentStream(buildStreamFormState(stream, motion));
+      resetUrlProbe();
       setIsEditing(true);
       setModalVisible(true);
     } catch (error) {
@@ -1271,7 +1213,7 @@ export function StreamsView() {
         resetVideo: true,
         detectionZones: [],
       }));
-      resetUrlProbe('');
+      resetUrlProbe();
       setIsEditing(false);
       setIsCloning(true);
       setModalVisible(true);
@@ -1283,7 +1225,7 @@ export function StreamsView() {
 
   // Close modal
   const closeModal = () => {
-    resetUrlProbe('');
+    resetUrlProbe();
     setModalVisible(false);
     setIsEditing(false);
     setIsCloning(false);
@@ -2894,8 +2836,8 @@ export function StreamsView() {
           onToggleSection={toggleSection}
           onInputChange={handleInputChange}
           onThresholdChange={handleThresholdChange}
-          onTestConnection={testStreamConnection}
-          urlProbe={urlProbe}
+          onTestUrl={testStreamUrl}
+          urlProbe={visibleUrlProbe}
           onTestMotion={triggerTestMotionEvent}
           onSave={handleSubmit}
           onClose={closeModal}
