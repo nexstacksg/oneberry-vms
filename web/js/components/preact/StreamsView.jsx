@@ -4,7 +4,7 @@
  */
 
 import { Fragment } from 'preact';
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import { showStatusMessage } from './ToastContainer.jsx';
 import { ContentLoader } from './LoadingIndicator.jsx';
 import { StreamDeleteModal } from './StreamDeleteModal.jsx';
@@ -13,6 +13,7 @@ import { StreamConfigModal } from './StreamConfigModal.jsx';
 import { HealthView } from './HealthView.jsx';
 import { validateSession } from '../../utils/auth-utils.js';
 import { obfuscateUrlCredentials, urlHasCredentials } from '../../utils/url-utils.js';
+import { detectedInfoToFormFields, formatDetectedSummary, isProbeableStreamUrl } from '../../utils/stream-probe-utils.js';
 import {
   VIDEO_FPS_PRESETS,
   VIDEO_RESOLUTION_PRESETS,
@@ -579,6 +580,10 @@ export function StreamsView() {
     motionTriggerSource: ''
   });
   const [isEditing, setIsEditing] = useState(false);
+  // Auto-detection of resolution / fps / codec from the stream URL
+  const [urlProbe, setUrlProbe] = useState({ status: 'idle' });
+  const probedKeyRef = useRef('');
+  const probeAbortRef = useRef(null);
   const [isCloning, setIsCloning] = useState(false);
 
   // State for delete modal
@@ -681,6 +686,10 @@ export function StreamsView() {
       },
       onSuccess: (data) => {
         if (data.success) {
+          if (data.info) {
+            const fields = applyDetectedStreamInfo(data.info);
+            setUrlProbe({ status: 'detected', summary: formatDetectedSummary(fields) });
+          }
           showStatusMessage(t('streams.streamConnectionSuccessful'), 'success', 3000);
         } else {
           showStatusMessage(t('streams.streamConnectionFailed', { message: data.message }), 'error', 5000);
@@ -981,6 +990,98 @@ export function StreamsView() {
     });
   };
 
+  // What identifies one probe: the URL plus anything that changes how it connects
+  const getStreamProbeKey = (stream) => {
+    if (!isProbeableStreamUrl(stream?.url)) {
+      return '';
+    }
+    return JSON.stringify([
+      stream.url.trim(),
+      String(stream.protocol),
+      stream.isOnvif ? stream.onvifUsername || '' : '',
+      stream.isOnvif ? stream.onvifPassword || '' : '',
+    ]);
+  };
+
+  const resetUrlProbe = (probedKey) => {
+    probeAbortRef.current?.abort();
+    probeAbortRef.current = null;
+    probedKeyRef.current = probedKey;
+    setUrlProbe({ status: 'idle' });
+  };
+
+  const applyDetectedStreamInfo = (info) => {
+    const fields = detectedInfoToFormFields(info);
+    if (Object.keys(fields).length > 0) {
+      setCurrentStream(prev => ({ ...prev, ...fields }));
+    }
+    return fields;
+  };
+
+  // Probe the stream once the user stops typing a complete RTSP URL, and fill
+  // in resolution, fps and codec. Each distinct URL is probed once; a newer
+  // URL cancels an older probe that is still running.
+  useEffect(() => {
+    if (!modalVisible || shouldHideCredentials) {
+      return undefined;
+    }
+    const probeKey = getStreamProbeKey(currentStream);
+    if (!probeKey || probeKey === probedKeyRef.current) {
+      return undefined;
+    }
+
+    const timer = setTimeout(async () => {
+      probeAbortRef.current?.abort();
+      const controller = new AbortController();
+      probeAbortRef.current = controller;
+      probedKeyRef.current = probeKey;
+      setUrlProbe({ status: 'detecting' });
+
+      try {
+        const data = await fetchJSON('/api/streams/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: currentStream.url.trim(),
+            protocol: parseInt(currentStream.protocol, 10),
+            onvif_username: currentStream.isOnvif ? currentStream.onvifUsername : undefined,
+            onvif_password: currentStream.isOnvif ? currentStream.onvifPassword : undefined,
+          }),
+          signal: controller.signal,
+          timeout: 20000,
+          retries: 0,
+        });
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (data?.success && data.info) {
+          const fields = applyDetectedStreamInfo(data.info);
+          setUrlProbe({ status: 'detected', summary: formatDetectedSummary(fields) });
+        } else {
+          setUrlProbe({ status: 'failed', message: data?.message || 'Could not read the stream' });
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setUrlProbe({ status: 'failed', message: error.message });
+        }
+      } finally {
+        if (probeAbortRef.current === controller) {
+          probeAbortRef.current = null;
+        }
+      }
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [
+    modalVisible,
+    shouldHideCredentials,
+    currentStream.url,
+    currentStream.protocol,
+    currentStream.isOnvif,
+    currentStream.onvifUsername,
+    currentStream.onvifPassword,
+  ]);
+
   // Test stream connection
   const testStreamConnection = () => {
     testStreamMutation.mutate({
@@ -1107,6 +1208,7 @@ export function StreamsView() {
       // Tags
       tags: ''
     });
+    resetUrlProbe('');
     setIsEditing(false);
     setIsCloning(false);
     setModalVisible(true);
@@ -1130,7 +1232,10 @@ export function StreamsView() {
       const stream = data.stream || {};
       const motion = data.motion_config || null;
 
-      setCurrentStream(buildStreamFormState(stream, motion));
+      const formState = buildStreamFormState(stream, motion);
+      setCurrentStream(formState);
+      // Editing keeps the saved values until the URL is changed
+      resetUrlProbe(getStreamProbeKey(formState));
       setIsEditing(true);
       setModalVisible(true);
     } catch (error) {
@@ -1166,6 +1271,7 @@ export function StreamsView() {
         resetVideo: true,
         detectionZones: [],
       }));
+      resetUrlProbe('');
       setIsEditing(false);
       setIsCloning(true);
       setModalVisible(true);
@@ -1177,6 +1283,7 @@ export function StreamsView() {
 
   // Close modal
   const closeModal = () => {
+    resetUrlProbe('');
     setModalVisible(false);
     setIsEditing(false);
     setIsCloning(false);
@@ -2788,6 +2895,7 @@ export function StreamsView() {
           onInputChange={handleInputChange}
           onThresholdChange={handleThresholdChange}
           onTestConnection={testStreamConnection}
+          urlProbe={urlProbe}
           onTestMotion={triggerTestMotionEvent}
           onSave={handleSubmit}
           onClose={closeModal}

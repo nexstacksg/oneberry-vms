@@ -297,6 +297,7 @@ export function StreamConfigModal({
   onInputChange,
   onThresholdChange,
   onTestConnection,
+  urlProbe = { status: 'idle' },
   onTestMotion,
   onSave,
   onClose,
@@ -570,6 +571,21 @@ export function StreamConfigModal({
                   <p className="mt-1 text-xs text-muted-foreground">
                     {hideCredentials ? t('streamsConfig.urlCredentialsHidden') : t('streamsConfig.rtspUrlHelp')}
                   </p>
+                  {urlProbe.status === 'detecting' && (
+                    <p className="mt-1 text-xs text-muted-foreground" data-testid="stream-url-probe">
+                      Detecting resolution and frame rate…
+                    </p>
+                  )}
+                  {urlProbe.status === 'detected' && (
+                    <p className="mt-1 text-xs text-green-600 dark:text-green-400" data-testid="stream-url-probe">
+                      Detected {urlProbe.summary || 'stream'}; resolution, FPS and codec were filled in.
+                    </p>
+                  )}
+                  {urlProbe.status === 'failed' && (
+                    <p className="mt-1 text-xs text-destructive" data-testid="stream-url-probe">
+                      Could not detect stream settings: {urlProbe.message}
+                    </p>
+                  )}
                 </div>
 
                 <div className="md:col-span-2">

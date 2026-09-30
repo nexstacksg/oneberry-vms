@@ -210,7 +210,8 @@ void handle_test_stream(const http_request_t *req, http_response_t *res) {
         if (info) {
             cJSON_AddNumberToObject(info, "width", width);
             cJSON_AddNumberToObject(info, "height", height);
-            cJSON_AddNumberToObject(info, "fps", (int)fps);
+            // Round rather than truncate: cameras often report e.g. 24.99 or 29.97
+            cJSON_AddNumberToObject(info, "fps", (int)(fps + 0.5));
             cJSON_AddStringToObject(info, "codec", codec_name);
             
             cJSON_AddItemToObject(response, "info", info);
