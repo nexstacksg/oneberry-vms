@@ -747,6 +747,48 @@ body > .container {
     background: hsl(var(--foreground) / 0.06);
 }
 
+.sidebar-layout-menu button.is-danger {
+    color: hsl(var(--destructive));
+}
+
+.sidebar-layout-menu button.is-danger:hover {
+    background: hsl(var(--destructive) / 0.08);
+}
+
+/* Sidebar camera row ⋮ menu (Edit / Delete) */
+.sidebar-live-camera-list .sidebar-camera-node {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+}
+
+.sidebar-live-camera-list .sidebar-camera-node > .sidebar-camera-link {
+    flex: 1 1 auto;
+}
+
+.sidebar-camera-menu-wrap .sidebar-kebab-button {
+    width: 1.35rem;
+    height: 1.35rem;
+}
+
+.sidebar-camera-menu-wrap {
+    opacity: 0;
+    transition: opacity 140ms ease;
+}
+
+.sidebar-camera-node:hover .sidebar-camera-menu-wrap,
+.sidebar-camera-node:focus-within .sidebar-camera-menu-wrap,
+.sidebar-camera-node.is-menu-open .sidebar-camera-menu-wrap {
+    opacity: 1;
+}
+
+@media (hover: none) {
+    .sidebar-camera-menu-wrap {
+        opacity: 1;
+    }
+}
+
 .sidebar-camera-context-menu {
     position: fixed;
     z-index: 1200;
@@ -1337,6 +1379,11 @@ body > .container {
 
     .stream-config-modal-panel {
         width: min(64rem, 100%);
+    }
+
+    /* Keep full-screen modals inside the content area, beside the sidebar */
+    .content-modal-backdrop {
+        left: var(--dashboard-sidebar-width);
     }
 }
 

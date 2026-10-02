@@ -93,8 +93,13 @@ const SidebarCameraRow = memo(({
   onCameraDragStart,
   onCameraDragEnd,
   onCameraContextMenu,
+  canManage = false,
+  menuOpen = false,
+  onMenuToggle,
+  onEdit,
+  onDelete,
 }) => (
-  <li className={`sidebar-camera-node ${isActive ? 'is-active' : ''} ${isSelected ? 'is-selected' : ''}`} role="presentation">
+  <li className={`sidebar-camera-node ${isActive ? 'is-active' : ''} ${isSelected ? 'is-selected' : ''} ${menuOpen ? 'is-menu-open' : ''}`} role="presentation">
     <a
       href={cameraHref}
       role="option"
@@ -115,6 +120,33 @@ const SidebarCameraRow = memo(({
       <TreeIcon type="camera" />
       <span className="sidebar-camera-name">{cameraName}</span>
     </a>
+    {canManage && (
+      <div className="sidebar-layout-menu-wrap sidebar-camera-menu-wrap" onClick={(event) => event.stopPropagation()}>
+        <button
+          type="button"
+          className="sidebar-kebab-button"
+          aria-label={`Open ${cameraName} camera menu`}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={(event) => {
+            event.stopPropagation();
+            onMenuToggle(cameraName);
+          }}
+        >
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <circle cx="8" cy="3.25" r="1.2" />
+            <circle cx="8" cy="8" r="1.2" />
+            <circle cx="8" cy="12.75" r="1.2" />
+          </svg>
+        </button>
+        {menuOpen && (
+          <div className="sidebar-layout-menu" role="menu">
+            <button type="button" role="menuitem" onClick={(event) => onEdit(cameraName, event)}>Edit</button>
+            <button type="button" role="menuitem" className="is-danger" onClick={(event) => onDelete(cameraName, event)}>Delete</button>
+          </div>
+        )}
+      </div>
+    )}
   </li>
 ));
 
@@ -779,6 +811,8 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
   // so the nav doesn't flash/reorder after load.
   const isAdmin = userRole === null || userRole === 'admin';
   const canDiscoverSidebarCameras = userRole === 'admin' && !demoMode;
+  // Same rule as the Streams page: admins and users may edit/delete, viewers may not
+  const canManageSidebarCameras = (userRole === null || userRole === 'admin' || userRole === 'user') && !demoMode;
   const canEditCurrentUser = authEnabled && !demoMode && Boolean(currentUser?.id);
   const displayUsername = username || (demoMode ? t('auth.demoViewer') : t('auth.user'));
 
@@ -1315,6 +1349,23 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
     navigateToAppPage(makeLiveHref({ layout: 'workspace' }));
   }, [activeNav, cameraContextMenu, selectedCameraNameList, selectedCameraNames]);
 
+  // Sidebar camera ⋮ menu: Edit and Delete hand off to the Streams page,
+  // which opens its existing edit form or delete confirmation.
+  const toggleCameraMenu = useCallback((cameraName) => {
+    setCameraContextMenu(null);
+    setOpenMenu((current) => (current === `camera:${cameraName}` ? null : `camera:${cameraName}`));
+  }, []);
+
+  const editCameraFromSidebar = useCallback((cameraName, event) => {
+    setOpenMenu(null);
+    navigateToAppPage(`streams.html?edit=${encodeURIComponent(cameraName)}`, event);
+  }, []);
+
+  const deleteCameraFromSidebar = useCallback((cameraName, event) => {
+    setOpenMenu(null);
+    navigateToAppPage(`streams.html?delete=${encodeURIComponent(cameraName)}`, event);
+  }, []);
+
   const openDiscoveredCameraInStreams = useCallback((event, device) => {
     if (!device?.ip_address) return;
 
@@ -1367,6 +1418,11 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
               onCameraDragStart={handleCameraDragStart}
               onCameraDragEnd={handleCameraDragEnd}
               onCameraContextMenu={handleSourceCameraContextMenu}
+              canManage={canManageSidebarCameras}
+              menuOpen={openMenu === `camera:${stream.name}`}
+              onMenuToggle={toggleCameraMenu}
+              onEdit={editCameraFromSidebar}
+              onDelete={deleteCameraFromSidebar}
             />
           );
         })}

@@ -1482,6 +1482,52 @@ export function StreamsView() {
     window.history.replaceState({}, '', nextUrl);
   }, [canCreateStreams]);
 
+  // Edit / Delete requested from the sidebar camera menu via
+  // streams.html?edit=<name> or ?delete=<name>. The SPA keeps this view
+  // mounted when navigating within it, so also re-check on oneberry:navigate.
+  const [sidebarActionTick, setSidebarActionTick] = useState(0);
+  useEffect(() => {
+    const onNavigate = () => setSidebarActionTick(tick => tick + 1);
+    window.addEventListener('oneberry:navigate', onNavigate);
+    return () => window.removeEventListener('oneberry:navigate', onNavigate);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || roleLoading || isLoading) {
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const editName = params.get('edit');
+    const deleteName = params.get('delete');
+    if (!editName && !deleteName) {
+      return;
+    }
+
+    params.delete('edit');
+    params.delete('delete');
+    const nextSearch = params.toString();
+    window.history.replaceState({}, '', `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash || ''}`);
+
+    if (!canModifyStreams) {
+      showStatusMessage('You do not have permission to edit or delete cameras.', 'error', 5000);
+      return;
+    }
+
+    const targetName = editName || deleteName;
+    const stream = streams.find(s => s.name === targetName);
+    if (!stream) {
+      showStatusMessage(`Camera "${targetName}" was not found`, 'error', 5000);
+      return;
+    }
+
+    if (editName) {
+      openEditStreamModal(stream.name);
+    } else {
+      openDeleteModal(stream);
+    }
+  }, [roleLoading, isLoading, canModifyStreams, streamsResponse, sidebarActionTick]);
+
   const validateRtspDeviceMutation = usePostMutation(
     '/api/discovery/rtsp/validate',
     {
@@ -2849,8 +2895,8 @@ export function StreamsView() {
       )}
 
       {onvifModalVisible && (
-        <div id="onvif-modal" className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 transition-opacity duration-300 p-4">
-          <div className="bg-card text-card-foreground rounded-lg shadow-xl w-[min(96vw,1440px)] max-h-[94vh] overflow-hidden flex flex-col">
+        <div id="onvif-modal" className="content-modal-backdrop fixed inset-0 bg-black/60 flex items-center justify-center z-50 transition-opacity duration-300 p-4">
+          <div className="bg-card text-card-foreground rounded-lg shadow-xl w-full max-w-[1440px] max-h-[94vh] overflow-hidden flex flex-col">
             <div className="flex items-start justify-between gap-4 p-5 border-b border-border">
               <div>
                 <h3 className="text-lg font-semibold">{t('streams.cameraDiscovery')}</h3>
@@ -3164,7 +3210,7 @@ export function StreamsView() {
       )}
 
       {showCustomNameInput && (
-        <div id="custom-name-modal" className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 transition-opacity duration-300">
+        <div id="custom-name-modal" className="content-modal-backdrop fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 transition-opacity duration-300">
           <div className="bg-card text-card-foreground rounded-lg shadow-xl max-w-md w-full">
             <div className="flex justify-between items-center p-4 border-b border-border">
               <h3 className="text-lg font-medium">{t('streams.streamName')}</h3>
