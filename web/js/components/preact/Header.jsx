@@ -4,7 +4,8 @@
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'preact/hooks';
-import { memo } from 'preact/compat';
+import { Fragment } from 'preact';
+import { createPortal, memo } from 'preact/compat';
 import {VERSION} from '../../version.js';
 import { fetchJSON, queryClient, useQuery } from '../../query-client.js';
 import { getSettings } from '../../utils/settings-utils.js';
@@ -72,6 +73,9 @@ const treeIcons = {
   camera: (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M4.75 8.25a2 2 0 0 1 2-2h7.25a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2H6.75a2 2 0 0 1-2-2v-7.5Zm11.25 2.25 3.25-2v7l-3.25-2v-3Z" />
   ),
+  folder: (
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M4.25 7.25a1.5 1.5 0 0 1 1.5-1.5h3.6l1.8 2h7.1a1.5 1.5 0 0 1 1.5 1.5v7.5a1.5 1.5 0 0 1-1.5 1.5H5.75a1.5 1.5 0 0 1-1.5-1.5v-9.5Z" />
+  ),
 };
 
 const TreeIcon = ({ type }) => (
@@ -99,8 +103,10 @@ const SidebarCameraRow = memo(({
   onMenuToggle,
   onEdit,
   onDelete,
+  inFolder = false,
+  onRemoveFromFolder,
 }) => (
-  <li className={`sidebar-camera-node ${isActive ? 'is-active' : ''} ${isSelected ? 'is-selected' : ''} ${menuOpen ? 'is-menu-open' : ''}`} role="presentation">
+  <li className={`sidebar-camera-node ${isActive ? 'is-active' : ''} ${isSelected ? 'is-selected' : ''} ${menuOpen ? 'is-menu-open' : ''} ${inFolder ? 'is-in-folder' : ''}`} role="presentation">
     <a
       href={cameraHref}
       role="option"
@@ -143,6 +149,9 @@ const SidebarCameraRow = memo(({
         {menuOpen && (
           <div className="sidebar-layout-menu" role="menu">
             <button type="button" role="menuitem" onClick={(event) => onEdit(cameraName, event)}>Edit</button>
+            {inFolder && (
+              <button type="button" role="menuitem" onClick={() => onRemoveFromFolder(cameraName)}>Remove from folder</button>
+            )}
             <button type="button" role="menuitem" className="is-danger" onClick={(event) => onDelete(cameraName, event)}>Delete</button>
           </div>
         )}
@@ -284,6 +293,16 @@ const normalizeLiveLayouts = (data = {}) => ({
 });
 
 const createLayoutId = () => `layout-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const createCameraFolderId = () => `folder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const CAMERA_FOLDERS_COLLAPSED_STORAGE_KEY = 'oneberry.sidebarCollapsedCameraFolders';
+const getStoredCollapsedFolderIds = () => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CAMERA_FOLDERS_COLLAPSED_STORAGE_KEY) || '[]');
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    return new Set();
+  }
+};
 const createLayoutTile = (camera, index = 0) => ({
   id: `tile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   camera,
@@ -379,6 +398,13 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
   const [discoveredDeviceToRemove, setDiscoveredDeviceToRemove] = useState(null);
   // Discovered (not yet added) devices sit behind a "Found cameras" toggle, closed by default
   const [foundCamerasExpanded, setFoundCamerasExpanded] = useState(false);
+  // Camera folders (saved server-side via /api/camera-folders)
+  const [cameraFolders, setCameraFolders] = useState([]);
+  const [collapsedFolderIds, setCollapsedFolderIds] = useState(getStoredCollapsedFolderIds);
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [folderToDelete, setFolderToDelete] = useState(null);
+  const [folderPicker, setFolderPicker] = useState(null); // { folderId, selected: Set }
   const [isDiscoveringCameras, setIsDiscoveringCameras] = useState(false);
   const { t } = useI18n();
   const suppressNextCameraClickRef = useRef(false);
@@ -411,6 +437,34 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
       refetchInterval: 30000,
     }
   );
+
+  const { data: cameraFoldersData } = useQuery(
+    ['camera-folders'],
+    '/api/camera-folders',
+    {
+      headers: getAuthHeaders(),
+      timeout: 10000,
+      retries: 1,
+      retryDelay: 1000,
+    },
+    {
+      refetchInterval: 30000,
+    }
+  );
+
+  useEffect(() => {
+    if (Array.isArray(cameraFoldersData?.folders)) {
+      setCameraFolders(cameraFoldersData.folders);
+    }
+  }, [cameraFoldersData]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CAMERA_FOLDERS_COLLAPSED_STORAGE_KEY, JSON.stringify(Array.from(collapsedFolderIds)));
+    } catch {
+      // Collapsed state is a convenience only
+    }
+  }, [collapsedFolderIds]);
 
   useEffect(() => {
     startLiveWarmup();
@@ -460,6 +514,23 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
       .sort((a, b) => String(a.ip_address || '').localeCompare(String(b.ip_address || '')))
   ), [discoveredDevices, ignoredDiscoveryAddresses, sidebarCameraList]);
   const streamByName = useMemo(() => new Map(sidebarCameraList.map((stream) => [stream.name, stream])), [sidebarCameraList]);
+
+  // Folders with their (visible) cameras, the cameras not in any folder, and
+  // the on-screen order used for keyboard navigation
+  const cameraFolderView = useMemo(() => cameraFolders.map((folder) => ({
+    ...folder,
+    streams: (folder.cameras || []).map((name) => streamByName.get(name)).filter(Boolean),
+  })), [cameraFolders, streamByName]);
+  const camerasInFolders = useMemo(() => new Set(
+    cameraFolderView.flatMap((folder) => folder.streams.map((stream) => stream.name))
+  ), [cameraFolderView]);
+  const ungroupedSidebarCameras = useMemo(() => (
+    sidebarCameraList.filter((stream) => !camerasInFolders.has(stream.name))
+  ), [camerasInFolders, sidebarCameraList]);
+  const navigableSidebarCameras = useMemo(() => [
+    ...cameraFolderView.flatMap((folder) => (collapsedFolderIds.has(folder.id) ? [] : folder.streams)),
+    ...ungroupedSidebarCameras,
+  ], [cameraFolderView, collapsedFolderIds, ungroupedSidebarCameras]);
   const selectedCameraNameList = useMemo(() => (
     sidebarCameraList
       .map((stream) => stream.name)
@@ -1318,21 +1389,21 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
   const handleSourceCameraKeyDown = useCallback((event) => {
     if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
 
-    const cameraCount = sidebarCameraList.length;
+    const cameraCount = navigableSidebarCameras.length;
     if (cameraCount === 0) return;
 
     event.preventDefault();
     setCameraContextMenu(null);
     const anchorCameraName = selectedCameraNameList[selectedCameraNameList.length - 1] || '';
-    const selectedIndex = sidebarCameraList.findIndex((stream) => stream.name === anchorCameraName);
+    const selectedIndex = navigableSidebarCameras.findIndex((stream) => stream.name === anchorCameraName);
     const nextIndex = event.key === 'ArrowDown'
       ? (selectedIndex < 0 ? 0 : Math.min(cameraCount - 1, selectedIndex + 1))
       : (selectedIndex < 0 ? cameraCount - 1 : Math.max(0, selectedIndex - 1));
-    const nextCameraId = sidebarCameraList[nextIndex]?.name || '';
+    const nextCameraId = navigableSidebarCameras[nextIndex]?.name || '';
     if (nextCameraId) {
       setSelectedCameraNames(new Set([nextCameraId]));
     }
-  }, [selectedCameraNameList, sidebarCameraList]);
+  }, [selectedCameraNameList, navigableSidebarCameras]);
 
   const handleSourceCameraContextMenu = useCallback((event) => {
     const cameraName = event.currentTarget?.dataset?.cameraId || '';
@@ -1403,6 +1474,106 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
     navigateToAppPage(makeLiveHref({ layout: 'workspace' }));
   }, [activeNav, cameraContextMenu, selectedCameraNameList, selectedCameraNames]);
 
+  const saveCameraFolders = useCallback(async (nextFolders) => {
+    const previous = cameraFolders;
+    setCameraFolders(nextFolders);
+    try {
+      const saved = await fetchJSON('/api/camera-folders', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify({ folders: nextFolders }),
+        timeout: 10000,
+        retries: 0,
+      });
+      setCameraFolders(saved?.folders || nextFolders);
+      queryClient.setQueryData(['camera-folders'], saved);
+      return true;
+    } catch (error) {
+      setCameraFolders(previous);
+      showStatusMessage(error.message || 'Failed to save camera folders', 'error', 6000);
+      return false;
+    }
+  }, [cameraFolders]);
+
+  const startCreateFolder = useCallback(() => {
+    setOpenMenu(null);
+    setCameraContextMenu(null);
+    setCameraListCollapsed(false);
+    setCreatingFolder(true);
+  }, []);
+
+  const handleCreateFolder = useCallback(async (event) => {
+    if (event) event.preventDefault();
+    const name = newFolderName.trim();
+    if (!name) return;
+    if (cameraFolders.some((folder) => folder.name.toLowerCase() === name.toLowerCase())) {
+      showStatusMessage(`A folder named "${name}" already exists`, 'error', 5000);
+      return;
+    }
+    setCreatingFolder(false);
+    setNewFolderName('');
+    await saveCameraFolders([...cameraFolders, { id: createCameraFolderId(), name, cameras: [] }]);
+  }, [cameraFolders, newFolderName, saveCameraFolders]);
+
+  const toggleFolderCollapsed = useCallback((folderId) => {
+    setCollapsedFolderIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(folderId)) next.delete(folderId); else next.add(folderId);
+      return next;
+    });
+  }, []);
+
+  const openFolderCameraPicker = useCallback((folder) => {
+    setOpenMenu(null);
+    setFolderPicker({ folderId: folder.id, selected: new Set(folder.cameras || []) });
+  }, []);
+
+  // Save the picker: the folder holds exactly the checked cameras; a checked
+  // camera is moved out of any other folder (a camera is in one folder only)
+  const saveFolderCameraPicker = useCallback(async () => {
+    if (!folderPicker) return;
+    const { folderId, selected } = folderPicker;
+    const ordered = sidebarCameraList.map((stream) => stream.name).filter((name) => selected.has(name));
+    const nextFolders = cameraFolders.map((folder) => (
+      folder.id === folderId
+        ? { ...folder, cameras: ordered }
+        : { ...folder, cameras: (folder.cameras || []).filter((name) => !selected.has(name)) }
+    ));
+    setFolderPicker(null);
+    if (await saveCameraFolders(nextFolders)) {
+      setCollapsedFolderIds((previous) => {
+        const next = new Set(previous);
+        next.delete(folderId);
+        return next;
+      });
+    }
+  }, [cameraFolders, folderPicker, saveCameraFolders, sidebarCameraList]);
+
+  const removeCameraFromFolder = useCallback((cameraName) => {
+    setOpenMenu(null);
+    saveCameraFolders(cameraFolders.map((folder) => ({
+      ...folder,
+      cameras: (folder.cameras || []).filter((name) => name !== cameraName),
+    })));
+  }, [cameraFolders, saveCameraFolders]);
+
+  const requestDeleteFolder = useCallback((folder) => {
+    setOpenMenu(null);
+    if (folder.streams.length > 0) {
+      showStatusMessage(`"${folder.name}" still has cameras. Remove them from the folder first.`, 'error', 5000);
+      return;
+    }
+    setFolderToDelete(folder);
+  }, []);
+
+  const deleteFolder = useCallback((folder) => {
+    if (!folder) return;
+    saveCameraFolders(cameraFolders.filter((item) => item.id !== folder.id));
+  }, [cameraFolders, saveCameraFolders]);
+
   // Sidebar camera ⋮ menu: Edit and Delete hand off to the Streams page,
   // which opens its existing edit form or delete confirmation.
   const toggleCameraMenu = useCallback((cameraName) => {
@@ -1436,47 +1607,148 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
     navigateToAppPage(`streams.html?discover=1&camera=${encodeURIComponent(device.ip_address)}`, event);
   }, []);
 
+  const renderSidebarCameraRow = (stream, inFolder) => {
+    const cameraHref = makeLiveHref({ cols: 1, rows: 1, stream: stream.name });
+    const statusKind = getStreamStatusKind(stream);
+    return (
+      <SidebarCameraRow
+        key={stream.name}
+        cameraHref={cameraHref}
+        cameraName={stream.name}
+        statusKind={statusKind}
+        statusLabel={t(`sidebar.status.${statusKind}`)}
+        isActive={activeNav === 'nav-live' && liveSelection.stream === stream.name}
+        isSelected={selectedCameraNames.has(stream.name)}
+        onCameraClick={handleSourceCameraClick}
+        onCameraDoubleClick={handleSourceCameraDoubleClick}
+        onCameraDragStart={handleCameraDragStart}
+        onCameraDragEnd={handleCameraDragEnd}
+        onCameraContextMenu={handleSourceCameraContextMenu}
+        canManage={canManageSidebarCameras}
+        menuOpen={openMenu === `camera:${stream.name}`}
+        onMenuToggle={toggleCameraMenu}
+        onEdit={editCameraFromSidebar}
+        onDelete={deleteCameraFromSidebar}
+        inFolder={inFolder}
+        onRemoveFromFolder={removeCameraFromFolder}
+      />
+    );
+  };
+
+  const renderCameraFolder = (folder) => {
+    const expanded = !collapsedFolderIds.has(folder.id);
+    const menuKey = `folder:${folder.id}`;
+    const isEmpty = folder.streams.length === 0;
+    return (
+      <Fragment key={`folder-${folder.id}`}>
+        <li className={`sidebar-camera-folder ${openMenu === menuKey ? 'is-menu-open' : ''}`} role="presentation">
+          <button
+            type="button"
+            className="sidebar-camera-folder-toggle"
+            aria-expanded={expanded}
+            onClick={() => toggleFolderCollapsed(folder.id)}
+            title={folder.name}
+          >
+            <span className="sidebar-camera-folder-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 6l6 6-6 6" />
+              </svg>
+            </span>
+            <TreeIcon type="folder" />
+            <span className="sidebar-camera-name">{folder.name}</span>
+            <span className="sidebar-tree-count">{folder.streams.length}</span>
+          </button>
+          {canManageSidebarCameras && (
+            <div className="sidebar-layout-menu-wrap sidebar-camera-menu-wrap" onClick={(event) => event.stopPropagation()}>
+              <button
+                type="button"
+                className="sidebar-kebab-button"
+                aria-label={`Open ${folder.name} folder menu`}
+                aria-haspopup="menu"
+                aria-expanded={openMenu === menuKey}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setCameraContextMenu(null);
+                  setOpenMenu((current) => (current === menuKey ? null : menuKey));
+                }}
+              >
+                <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                  <circle cx="8" cy="3.25" r="1.2" />
+                  <circle cx="8" cy="8" r="1.2" />
+                  <circle cx="8" cy="12.75" r="1.2" />
+                </svg>
+              </button>
+              {openMenu === menuKey && (
+                <div className="sidebar-layout-menu" role="menu">
+                  <button type="button" role="menuitem" onClick={() => openFolderCameraPicker(folder)}>Add cameras</button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="is-danger"
+                    disabled={!isEmpty}
+                    title={isEmpty ? '' : 'Remove the cameras from this folder before deleting it'}
+                    onClick={() => requestDeleteFolder(folder)}
+                  >
+                    Delete folder
+                  </button>
+                  {!isEmpty && <div className="sidebar-layout-menu-hint">Only empty folders can be deleted</div>}
+                </div>
+              )}
+            </div>
+          )}
+        </li>
+        {expanded && folder.streams.map((stream) => renderSidebarCameraRow(stream, true))}
+        {expanded && isEmpty && (
+          <li className="sidebar-camera-folder-empty" role="presentation">Empty folder</li>
+        )}
+      </Fragment>
+    );
+  };
+
   const renderCameraList = () => {
-    if (sidebarCameraList.length === 0) {
-      return <div className="sidebar-building-empty">No cameras</div>;
+    const createFolderForm = creatingFolder && (
+      <form className="sidebar-layout-inline-form" onSubmit={handleCreateFolder}>
+        <input
+          type="text"
+          value={newFolderName}
+          autoFocus
+          maxLength="96"
+          placeholder="Folder name"
+          onInput={(event) => setNewFolderName(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              setCreatingFolder(false);
+              setNewFolderName('');
+            }
+          }}
+        />
+        <button type="submit" disabled={!newFolderName.trim()}>Save</button>
+      </form>
+    );
+
+    if (sidebarCameraList.length === 0 && cameraFolderView.length === 0) {
+      return (
+        <>
+          {createFolderForm}
+          <div className="sidebar-building-empty">No cameras</div>
+        </>
+      );
     }
 
     return (
-      <ul
-        className="sidebar-camera-tree sidebar-live-camera-list"
-        role="listbox"
-        aria-label="Camera list"
-        tabIndex={0}
-        onKeyDown={handleSourceCameraKeyDown}
-      >
-        {sidebarCameraList.map((stream) => {
-          const cameraHref = makeLiveHref({ cols: 1, rows: 1, stream: stream.name });
-          const statusKind = getStreamStatusKind(stream);
-          const cameraActive = activeNav === 'nav-live' && liveSelection.stream === stream.name;
-          const cameraSelected = selectedCameraNames.has(stream.name);
-          return (
-            <SidebarCameraRow
-              key={stream.name}
-              cameraHref={cameraHref}
-              cameraName={stream.name}
-              statusKind={statusKind}
-              statusLabel={t(`sidebar.status.${statusKind}`)}
-              isActive={cameraActive}
-              isSelected={cameraSelected}
-              onCameraClick={handleSourceCameraClick}
-              onCameraDoubleClick={handleSourceCameraDoubleClick}
-              onCameraDragStart={handleCameraDragStart}
-              onCameraDragEnd={handleCameraDragEnd}
-              onCameraContextMenu={handleSourceCameraContextMenu}
-              canManage={canManageSidebarCameras}
-              menuOpen={openMenu === `camera:${stream.name}`}
-              onMenuToggle={toggleCameraMenu}
-              onEdit={editCameraFromSidebar}
-              onDelete={deleteCameraFromSidebar}
-            />
-          );
-        })}
-      </ul>
+      <>
+        {createFolderForm}
+        <ul
+          className="sidebar-camera-tree sidebar-live-camera-list"
+          role="listbox"
+          aria-label="Camera list"
+          tabIndex={0}
+          onKeyDown={handleSourceCameraKeyDown}
+        >
+          {cameraFolderView.map(renderCameraFolder)}
+          {ungroupedSidebarCameras.map((stream) => renderSidebarCameraRow(stream, false))}
+        </ul>
+      </>
     );
   };
 
@@ -1574,21 +1846,50 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
 
   const renderCameraListSection = () => (
     <div className={`sidebar-camera-list-section ${cameraListCollapsed ? 'is-collapsed' : ''}`}>
-      <button
-        type="button"
-        className="sidebar-section-heading sidebar-section-toggle"
-        aria-expanded={!cameraListCollapsed}
-        aria-controls="sidebar-camera-list-panel"
-        onClick={() => setCameraListCollapsed((collapsed) => !collapsed)}
-      >
-        <span className="sidebar-section-label">Camera List</span>
-        <span className="sidebar-tree-count">{sidebarCameraList.length}</span>
-        <span className="sidebar-tree-toggle" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 6l6 6-6 6" />
-          </svg>
-        </span>
-      </button>
+      <div className="sidebar-camera-list-heading">
+        <button
+          type="button"
+          className="sidebar-section-heading sidebar-section-toggle"
+          aria-expanded={!cameraListCollapsed}
+          aria-controls="sidebar-camera-list-panel"
+          onClick={() => setCameraListCollapsed((collapsed) => !collapsed)}
+        >
+          <span className="sidebar-section-label">Camera List</span>
+          <span className="sidebar-tree-count">{sidebarCameraList.length}</span>
+          <span className="sidebar-tree-toggle" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 6l6 6-6 6" />
+            </svg>
+          </span>
+        </button>
+        {canManageSidebarCameras && (
+          <div className="sidebar-layout-menu-wrap" onClick={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              className="sidebar-kebab-button"
+              aria-label="Open camera list menu"
+              aria-haspopup="menu"
+              aria-expanded={openMenu === 'camera-list'}
+              onClick={(event) => {
+                event.stopPropagation();
+                setCameraContextMenu(null);
+                setOpenMenu((current) => (current === 'camera-list' ? null : 'camera-list'));
+              }}
+            >
+              <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <circle cx="8" cy="3.25" r="1.2" />
+                <circle cx="8" cy="8" r="1.2" />
+                <circle cx="8" cy="12.75" r="1.2" />
+              </svg>
+            </button>
+            {openMenu === 'camera-list' && (
+              <div className="sidebar-layout-menu" role="menu">
+                <button type="button" role="menuitem" onClick={startCreateFolder}>Create folder</button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
       {!cameraListCollapsed && (
         <div id="sidebar-camera-list-panel">
           {renderCameraList()}
@@ -1937,6 +2238,77 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
         message={`Remove ${discoveredDeviceToRemove?.name || discoveredDeviceToRemove?.ip_address || ''} from the camera list? It will no longer be shown here, even after the next network scan.`}
         confirmLabel="Remove"
       />
+      <ConfirmDialog
+        isOpen={folderToDelete !== null}
+        onClose={() => setFolderToDelete(null)}
+        onConfirm={() => deleteFolder(folderToDelete)}
+        title="Are you sure?"
+        message={`Delete the folder "${folderToDelete?.name || ''}"?`}
+        confirmLabel="Delete"
+      />
+      {folderPicker && createPortal(
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          data-keyboard-nav-preserve
+          onClick={(event) => { if (event.target === event.currentTarget) setFolderPicker(null); }}
+        >
+          <div className="bg-card text-card-foreground rounded-lg shadow-xl p-6 max-w-md w-full mx-4" role="dialog" aria-modal="true" aria-labelledby="folder-picker-title">
+            <h3 id="folder-picker-title" className="text-base font-semibold mb-1">
+              Add cameras to "{cameraFolders.find((folder) => folder.id === folderPicker.folderId)?.name}"
+            </h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              Checked cameras are shown in this folder. A camera can only be in one folder.
+            </p>
+            <div className="max-h-72 overflow-y-auto border border-border rounded-md divide-y divide-border">
+              {sidebarCameraList.length === 0 && (
+                <div className="p-3 text-sm text-muted-foreground">No cameras</div>
+              )}
+              {sidebarCameraList.map((stream) => {
+                const otherFolder = cameraFolders.find((folder) => (
+                  folder.id !== folderPicker.folderId && (folder.cameras || []).includes(stream.name)
+                ));
+                const checked = folderPicker.selected.has(stream.name);
+                return (
+                  <label key={stream.name} className="flex items-center gap-3 px-3 py-2 text-sm cursor-pointer hover:bg-muted">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => setFolderPicker((current) => {
+                        const selected = new Set(current.selected);
+                        if (selected.has(stream.name)) selected.delete(stream.name); else selected.add(stream.name);
+                        return { ...current, selected };
+                      })}
+                    />
+                    <span className="flex-1 truncate">{stream.name}</span>
+                    {otherFolder && (
+                      <span className="text-xs text-muted-foreground truncate">
+                        {checked ? `moves from ${otherFolder.name}` : `in ${otherFolder.name}`}
+                      </span>
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+            <div className="flex justify-end gap-3 mt-5">
+              <button
+                type="button"
+                className="px-4 py-2 border border-border rounded-md text-sm font-medium hover:bg-muted transition-colors"
+                onClick={() => setFolderPicker(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="px-4 py-2 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+                onClick={saveFolderCameraPicker}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
       {isProfileModalOpen && currentUser && (
         <EditUserModal
           currentUser={currentUser}

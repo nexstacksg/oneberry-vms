@@ -584,6 +584,101 @@ body > .container {
     gap: 0.25rem;
 }
 
+/* Camera List heading with its ⋮ menu (Create folder) */
+.sidebar-camera-list-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-top: 0.9rem;
+}
+
+.sidebar-camera-list-heading > .sidebar-section-toggle {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-top: 0;
+}
+
+/* Camera folders */
+.sidebar-camera-folder {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+}
+
+.sidebar-camera-folder-toggle {
+    display: flex;
+    flex: 1 1 auto;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    min-height: 1.65rem;
+    padding: 0.25rem 0.45rem;
+    border: 0;
+    border-radius: 0.45rem;
+    background: transparent;
+    color: hsl(var(--foreground));
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-align: left;
+    transition: background-color 160ms ease;
+}
+
+.sidebar-camera-folder-toggle:hover {
+    background: hsl(var(--muted));
+}
+
+.sidebar-camera-folder-toggle .sidebar-camera-name {
+    flex: 1 1 auto;
+}
+
+.sidebar-camera-folder-chevron {
+    display: inline-flex;
+    flex: 0 0 auto;
+    color: hsl(var(--muted-foreground));
+    transition: transform 160ms ease;
+}
+
+.sidebar-camera-folder-chevron svg {
+    width: 0.8rem;
+    height: 0.8rem;
+}
+
+.sidebar-camera-folder-toggle[aria-expanded="true"] .sidebar-camera-folder-chevron {
+    transform: rotate(90deg);
+}
+
+.sidebar-camera-folder:hover .sidebar-camera-menu-wrap,
+.sidebar-camera-folder:focus-within .sidebar-camera-menu-wrap,
+.sidebar-camera-folder.is-menu-open .sidebar-camera-menu-wrap {
+    opacity: 1;
+}
+
+.sidebar-live-camera-list .sidebar-camera-node.is-in-folder > .sidebar-camera-link {
+    padding-left: 1.6rem;
+}
+
+.sidebar-camera-folder-empty {
+    padding: 0.15rem 0.45rem 0.25rem 2.35rem;
+    color: hsl(var(--muted-foreground));
+    font-size: 0.72rem;
+    font-style: italic;
+}
+
+.sidebar-layout-menu button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+    background: transparent;
+}
+
+.sidebar-layout-menu-hint {
+    padding: 0.25rem 0.6rem 0.35rem;
+    color: hsl(var(--muted-foreground));
+    font-size: 0.7rem;
+}
+
 /* "Found cameras" sub-group: discovered devices, collapsed by default */
 .sidebar-found-cameras {
     margin-top: 0.35rem;
