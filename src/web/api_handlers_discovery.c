@@ -204,6 +204,13 @@ static void append_onvif_device(discovered_camera_t *devices, int *count, const 
 }
 
 static void append_rtsp_device(discovered_camera_t *devices, int *count, const char *ip, int port) {
+    // This NVR's own go2rtc answers RTSP on its LAN address; don't list it as a camera
+    int go2rtc_rtsp_port = g_config.go2rtc_rtsp_port > 0 ? g_config.go2rtc_rtsp_port : 8554;
+    if (port == go2rtc_rtsp_port && g_config.go2rtc_external_ip[0] != '\0' &&
+        strcmp(ip, g_config.go2rtc_external_ip) == 0) {
+        return;
+    }
+
     int index = find_device_by_ip(devices, *count, ip);
     if (index < 0) {
         if (*count >= MAX_UNIVERSAL_DEVICES) {

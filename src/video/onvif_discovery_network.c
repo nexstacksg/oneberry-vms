@@ -167,6 +167,19 @@ int detect_local_networks(char networks[][64], int max_networks) {
             struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
             uint32_t ip = ntohl(addr->sin_addr.s_addr);
             uint32_t network = ip & ntohl(netmask->sin_addr.s_addr);
+
+            // Inside a Docker container the interface is just "eth0" on
+            // Docker's own bridge, so the name checks above miss it. Scanning
+            // it only finds the container and the Docker host, which answer
+            // RTSP on go2rtc's 8554 and look like cameras. Docker allocates
+            // bridges from 172.17.0.0-172.31.255.255; camera LANs need an
+            // explicit discovery network in that case.
+            if (access("/.dockerenv", F_OK) == 0 &&
+                ip >= 0xAC110000u && ip <= 0xAC1FFFFFu) {
+                log_info("Skipping Docker bridge network on %s (%s); set the discovery "
+                         "network in Settings to scan the camera LAN", ifa->ifa_name, host);
+                continue;
+            }
             
             // Convert network address to string
             struct in_addr network_addr;

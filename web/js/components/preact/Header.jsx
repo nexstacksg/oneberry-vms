@@ -9,6 +9,7 @@ import {VERSION} from '../../version.js';
 import { fetchJSON, queryClient, useQuery } from '../../query-client.js';
 import { getSettings } from '../../utils/settings-utils.js';
 import { showStatusMessage } from './ToastContainer.jsx';
+import { ConfirmDialog } from './UI.jsx';
 import { EditUserModal } from './users/EditUserModal.jsx';
 import { getAuthHeaders, isDemoMode, validateSession } from '../../utils/auth-utils.js';
 import { navigateToAppPage } from '../../utils/navigation-utils.js';
@@ -369,6 +370,10 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
   const [liveLayoutEditState, setLiveLayoutEditState] = useState({ layoutId: '', editing: false });
   const [locationSearch, setLocationSearch] = useState(() => (typeof window !== 'undefined' ? window.location.search : ''));
   const [discoveredDevices, setDiscoveredDevices] = useState([]);
+  // Discovered addresses the admin removed from the list (saved server-side
+  // in onvif_discovery_ignored so they stay hidden after later scans)
+  const [ignoredDiscoveryAddresses, setIgnoredDiscoveryAddresses] = useState(() => new Set());
+  const [discoveredDeviceToRemove, setDiscoveredDeviceToRemove] = useState(null);
   const [isDiscoveringCameras, setIsDiscoveringCameras] = useState(false);
   const { t } = useI18n();
   const suppressNextCameraClickRef = useRef(false);
@@ -434,7 +439,8 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
   ), [sidebarStreams]);
   const sidebarDiscoveredCameraList = useMemo(() => (
     discoveredDevices
-      .filter((device) => device?.ip_address && !sidebarCameraList.some((stream) => {
+      .filter((device) => device?.ip_address && !ignoredDiscoveryAddresses.has(device.ip_address))
+      .filter((device) => !sidebarCameraList.some((stream) => {
         if (!stream) return false;
         return [stream.url, stream.secondary_url].some((streamUrl) => {
           if (!streamUrl) return false;
@@ -447,7 +453,7 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
       }))
       .slice()
       .sort((a, b) => String(a.ip_address || '').localeCompare(String(b.ip_address || '')))
-  ), [discoveredDevices, sidebarCameraList]);
+  ), [discoveredDevices, ignoredDiscoveryAddresses, sidebarCameraList]);
   const streamByName = useMemo(() => new Map(sidebarCameraList.map((stream) => [stream.name, stream])), [sidebarCameraList]);
   const selectedCameraNameList = useMemo(() => (
     sidebarCameraList
@@ -847,6 +853,49 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
       return null;
     }
   }, [canDiscoverSidebarCameras]);
+
+  useEffect(() => {
+    if (!canDiscoverSidebarCameras) return undefined;
+    let cancelled = false;
+    fetchJSON('/api/settings', { timeout: 5000, retries: 0 })
+      .then((settings) => {
+        if (cancelled) return;
+        const saved = String(settings?.onvif_discovery_ignored || '')
+          .split(',')
+          .map((address) => address.trim())
+          .filter(Boolean);
+        setIgnoredDiscoveryAddresses(new Set(saved));
+      })
+      .catch((error) => console.warn('Could not load removed discovery addresses:', error));
+    return () => { cancelled = true; };
+  }, [canDiscoverSidebarCameras]);
+
+  const removeDiscoveredDevice = useCallback(async (device) => {
+    const address = device?.ip_address;
+    if (!address) return;
+
+    const previous = ignoredDiscoveryAddresses;
+    const next = new Set(previous);
+    next.add(address);
+    setIgnoredDiscoveryAddresses(next);
+
+    try {
+      await fetchJSON('/api/settings', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify({ onvif_discovery_ignored: Array.from(next).join(',') }),
+        timeout: 10000,
+        retries: 0,
+      });
+      showStatusMessage(`Removed ${device.name || address} from the camera list`, 'success', 3000);
+    } catch (error) {
+      setIgnoredDiscoveryAddresses(previous);
+      showStatusMessage(`Could not remove ${address}: ${error.message}`, 'error', 5000);
+    }
+  }, [ignoredDiscoveryAddresses]);
 
   const startSidebarCameraDiscovery = useCallback(async () => {
     if (!canDiscoverSidebarCameras) {
@@ -1427,7 +1476,10 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
           );
         })}
         {sidebarDiscoveredCameraList.map((device) => (
-          <li key={`discovered-${device.ip_address}`} className="sidebar-camera-node">
+          <li
+            key={`discovered-${device.ip_address}`}
+            className={`sidebar-camera-node ${openMenu === `discovered:${device.ip_address}` ? 'is-menu-open' : ''}`}
+          >
             <a
               href={`streams.html?discover=1&camera=${encodeURIComponent(device.ip_address)}`}
               className="sidebar-camera-link sidebar-network-camera-link"
@@ -1439,6 +1491,41 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
               <span className="sidebar-camera-name">{device.name || device.ip_address}</span>
               <span className="sidebar-camera-auth-badge">Not added</span>
             </a>
+            <div className="sidebar-layout-menu-wrap sidebar-camera-menu-wrap" onClick={(event) => event.stopPropagation()}>
+              <button
+                type="button"
+                className="sidebar-kebab-button"
+                aria-label={`Open ${device.name || device.ip_address} menu`}
+                aria-haspopup="menu"
+                aria-expanded={openMenu === `discovered:${device.ip_address}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setCameraContextMenu(null);
+                  setOpenMenu((current) => (current === `discovered:${device.ip_address}` ? null : `discovered:${device.ip_address}`));
+                }}
+              >
+                <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                  <circle cx="8" cy="3.25" r="1.2" />
+                  <circle cx="8" cy="8" r="1.2" />
+                  <circle cx="8" cy="12.75" r="1.2" />
+                </svg>
+              </button>
+              {openMenu === `discovered:${device.ip_address}` && (
+                <div className="sidebar-layout-menu" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="is-danger"
+                    onClick={() => {
+                      setOpenMenu(null);
+                      setDiscoveredDeviceToRemove(device);
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              )}
+            </div>
           </li>
         ))}
       </ul>
@@ -1801,6 +1888,14 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
         />
       </header>
       {renderCameraContextMenu()}
+      <ConfirmDialog
+        isOpen={discoveredDeviceToRemove !== null}
+        onClose={() => setDiscoveredDeviceToRemove(null)}
+        onConfirm={() => removeDiscoveredDevice(discoveredDeviceToRemove)}
+        title="Are you sure?"
+        message={`Remove ${discoveredDeviceToRemove?.name || discoveredDeviceToRemove?.ip_address || ''} from the camera list? It will no longer be shown here, even after the next network scan.`}
+        confirmLabel="Remove"
+      />
       {isProfileModalOpen && currentUser && (
         <EditUserModal
           currentUser={currentUser}

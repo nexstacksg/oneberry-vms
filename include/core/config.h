@@ -186,6 +186,7 @@ typedef struct {
     bool onvif_discovery_enabled;    // Whether ONVIF discovery is enabled
     int onvif_discovery_interval;    // Interval in seconds between discovery attempts
     char onvif_discovery_network[64]; // Network to scan for ONVIF devices (e.g., "192.168.1.0/24")
+    char onvif_discovery_ignored[1024]; // Comma-separated device addresses hidden from discovery results
     
     // Stream settings
     int max_streams;            // Current allocated stream config slots. Grows with database/runtime needs.

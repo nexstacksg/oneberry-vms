@@ -433,6 +433,7 @@ void load_default_config(config_t *config) {
     config->onvif_discovery_enabled = false;  // Disabled by default
     config->onvif_discovery_interval = 300;   // 5 minutes between scans
     snprintf(config->onvif_discovery_network, sizeof(config->onvif_discovery_network), "auto");
+    config->onvif_discovery_ignored[0] = '\0';
 
     // Initialize default values for detection-based recording in streams
     for (int i = 0; i < config->max_streams; i++) {
@@ -936,6 +937,9 @@ static int config_ini_handler(void* user, const char* section, const char* name,
         } else if (strcmp(name, "discovery_network") == 0) {
             strncpy(config->onvif_discovery_network, value, sizeof(config->onvif_discovery_network) - 1);
             config->onvif_discovery_network[sizeof(config->onvif_discovery_network) - 1] = '\0';
+        } else if (strcmp(name, "discovery_ignored") == 0) {
+            strncpy(config->onvif_discovery_ignored, value, sizeof(config->onvif_discovery_ignored) - 1);
+            config->onvif_discovery_ignored[sizeof(config->onvif_discovery_ignored) - 1] = '\0';
         }
     }
     // MQTT settings for detection event streaming
@@ -1850,6 +1854,9 @@ int save_config(const config_t *config, const char *path) {
     fprintf(file, "discovery_enabled = %s\n", config->onvif_discovery_enabled ? "true" : "false");
     fprintf(file, "discovery_interval = %d\n", config->onvif_discovery_interval);
     fprintf(file, "discovery_network = %s\n", config->onvif_discovery_network);
+    if (config->onvif_discovery_ignored[0] != '\0') {
+        fprintf(file, "discovery_ignored = %s\n", config->onvif_discovery_ignored);
+    }
 
     // Stream configurations are stored exclusively in the database.
     // Do NOT write [stream.X] sections here.

@@ -1254,6 +1254,7 @@ void handle_get_settings(const http_request_t *req, http_response_t *res) {
     cJSON_AddBoolToObject(settings, "onvif_discovery_enabled", g_config.onvif_discovery_enabled);
     cJSON_AddNumberToObject(settings, "onvif_discovery_interval", g_config.onvif_discovery_interval);
     cJSON_AddStringToObject(settings, "onvif_discovery_network", g_config.onvif_discovery_network);
+    cJSON_AddStringToObject(settings, "onvif_discovery_ignored", g_config.onvif_discovery_ignored);
 
     // Convert to string
     char *json_str = cJSON_PrintUnformatted(settings);
@@ -2049,6 +2050,24 @@ void handle_post_settings(const http_request_t *req, http_response_t *res) {
         g_config.onvif_discovery_network[sizeof(g_config.onvif_discovery_network) - 1] = '\0';
         settings_changed = true;
         log_info("Updated onvif_discovery_network: %s", g_config.onvif_discovery_network);
+    }
+
+    // Device addresses the user removed from the discovery list. Written
+    // verbatim to the ini file, so keep only address characters: a newline
+    // or '=' here would corrupt the config.
+    cJSON *onvif_discovery_ignored = cJSON_GetObjectItem(settings, "onvif_discovery_ignored");
+    if (onvif_discovery_ignored && cJSON_IsString(onvif_discovery_ignored)) {
+        size_t out = 0;
+        for (const char *p = onvif_discovery_ignored->valuestring;
+             *p && out < sizeof(g_config.onvif_discovery_ignored) - 1; p++) {
+            if (isalnum((unsigned char)*p) || *p == '.' || *p == ':' || *p == ',' ||
+                *p == '_' || *p == '-') {
+                g_config.onvif_discovery_ignored[out++] = *p;
+            }
+        }
+        g_config.onvif_discovery_ignored[out] = '\0';
+        settings_changed = true;
+        log_info("Updated onvif_discovery_ignored: %s", g_config.onvif_discovery_ignored);
     }
 
     cJSON *db_backup_interval_minutes = cJSON_GetObjectItem(settings, "db_backup_interval_minutes");
