@@ -584,6 +584,38 @@ body > .container {
     gap: 0.25rem;
 }
 
+/* "Found cameras" sub-group: discovered devices, collapsed by default */
+.sidebar-found-cameras {
+    margin-top: 0.35rem;
+}
+
+.sidebar-found-cameras-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 1.65rem;
+    padding: 0.25rem 0.45rem;
+    border-radius: 0.45rem;
+    transition: background-color 160ms ease;
+}
+
+.sidebar-found-cameras-toggle:hover {
+    background: hsl(var(--muted));
+}
+
+.sidebar-found-cameras-toggle .sidebar-section-label {
+    font-size: 0.76rem;
+    font-weight: 600;
+    letter-spacing: normal;
+    text-transform: none;
+    color: hsl(var(--muted-foreground));
+}
+
+.sidebar-found-cameras .sidebar-live-camera-list {
+    margin-top: 0.15rem;
+    padding-left: 0.6rem;
+}
+
 .sidebar-layouts-section,
 .sidebar-layout-tree,
 .sidebar-layout-camera-tree {

@@ -374,6 +374,8 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
   // in onvif_discovery_ignored so they stay hidden after later scans)
   const [ignoredDiscoveryAddresses, setIgnoredDiscoveryAddresses] = useState(() => new Set());
   const [discoveredDeviceToRemove, setDiscoveredDeviceToRemove] = useState(null);
+  // Discovered (not yet added) devices sit behind a "Found cameras" toggle, closed by default
+  const [foundCamerasExpanded, setFoundCamerasExpanded] = useState(false);
   const [isDiscoveringCameras, setIsDiscoveringCameras] = useState(false);
   const { t } = useI18n();
   const suppressNextCameraClickRef = useRef(false);
@@ -1432,12 +1434,8 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
   }, []);
 
   const renderCameraList = () => {
-    if (sidebarCameraList.length === 0 && sidebarDiscoveredCameraList.length === 0) {
-      return (
-        <div className="sidebar-building-empty">
-          {isDiscoveringCameras ? 'Discovering cameras...' : 'No cameras'}
-        </div>
-      );
+    if (sidebarCameraList.length === 0) {
+      return <div className="sidebar-building-empty">No cameras</div>;
     }
 
     return (
@@ -1475,60 +1473,98 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
             />
           );
         })}
-        {sidebarDiscoveredCameraList.map((device) => (
-          <li
-            key={`discovered-${device.ip_address}`}
-            className={`sidebar-camera-node ${openMenu === `discovered:${device.ip_address}` ? 'is-menu-open' : ''}`}
-          >
-            <a
-              href={`streams.html?discover=1&camera=${encodeURIComponent(device.ip_address)}`}
-              className="sidebar-camera-link sidebar-network-camera-link"
-              title={`${device.ip_address} - Discovered network camera. Select to add.`}
-              onClick={(event) => openDiscoveredCameraInStreams(event, device)}
-            >
-              <span className="sidebar-camera-status is-warning" aria-hidden="true"></span>
-              <TreeIcon type="camera" />
-              <span className="sidebar-camera-name">{device.name || device.ip_address}</span>
-              <span className="sidebar-camera-auth-badge">Not added</span>
-            </a>
-            <div className="sidebar-layout-menu-wrap sidebar-camera-menu-wrap" onClick={(event) => event.stopPropagation()}>
-              <button
-                type="button"
-                className="sidebar-kebab-button"
-                aria-label={`Open ${device.name || device.ip_address} menu`}
-                aria-haspopup="menu"
-                aria-expanded={openMenu === `discovered:${device.ip_address}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setCameraContextMenu(null);
-                  setOpenMenu((current) => (current === `discovered:${device.ip_address}` ? null : `discovered:${device.ip_address}`));
-                }}
-              >
-                <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                  <circle cx="8" cy="3.25" r="1.2" />
-                  <circle cx="8" cy="8" r="1.2" />
-                  <circle cx="8" cy="12.75" r="1.2" />
-                </svg>
-              </button>
-              {openMenu === `discovered:${device.ip_address}` && (
-                <div className="sidebar-layout-menu" role="menu">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="is-danger"
-                    onClick={() => {
-                      setOpenMenu(null);
-                      setDiscoveredDeviceToRemove(device);
-                    }}
-                  >
-                    Remove
-                  </button>
-                </div>
-              )}
-            </div>
-          </li>
-        ))}
       </ul>
+    );
+  };
+
+  const renderFoundCameras = () => {
+    const foundCount = sidebarDiscoveredCameraList.length;
+    if (foundCount === 0 && !isDiscoveringCameras) {
+      return null;
+    }
+
+    return (
+      <div className="sidebar-found-cameras">
+        <button
+          type="button"
+          className="sidebar-section-toggle sidebar-found-cameras-toggle"
+          aria-expanded={foundCamerasExpanded}
+          aria-controls="sidebar-found-cameras-panel"
+          onClick={() => setFoundCamerasExpanded((expanded) => !expanded)}
+          title="Cameras found on the network that are not added yet. Click one to add it."
+        >
+          <span className="sidebar-camera-status is-warning" aria-hidden="true"></span>
+          <span className="sidebar-section-label">
+            {isDiscoveringCameras && foundCount === 0 ? 'Scanning for cameras…' : 'Found cameras'}
+          </span>
+          {foundCount > 0 && <span className="sidebar-tree-count">{foundCount}</span>}
+          <span className="sidebar-tree-toggle" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 6l6 6-6 6" />
+            </svg>
+          </span>
+        </button>
+        {foundCamerasExpanded && foundCount > 0 && (
+          <ul
+            id="sidebar-found-cameras-panel"
+            className="sidebar-camera-tree sidebar-live-camera-list"
+            aria-label="Found cameras"
+          >
+          {sidebarDiscoveredCameraList.map((device) => (
+            <li
+              key={`discovered-${device.ip_address}`}
+              className={`sidebar-camera-node ${openMenu === `discovered:${device.ip_address}` ? 'is-menu-open' : ''}`}
+            >
+              <a
+                href={`streams.html?discover=1&camera=${encodeURIComponent(device.ip_address)}`}
+                className="sidebar-camera-link sidebar-network-camera-link"
+                title={`${device.ip_address} - Discovered network camera. Select to add.`}
+                onClick={(event) => openDiscoveredCameraInStreams(event, device)}
+              >
+                <span className="sidebar-camera-status is-warning" aria-hidden="true"></span>
+                <TreeIcon type="camera" />
+                <span className="sidebar-camera-name">{device.name || device.ip_address}</span>
+              </a>
+              <div className="sidebar-layout-menu-wrap sidebar-camera-menu-wrap" onClick={(event) => event.stopPropagation()}>
+                <button
+                  type="button"
+                  className="sidebar-kebab-button"
+                  aria-label={`Open ${device.name || device.ip_address} menu`}
+                  aria-haspopup="menu"
+                  aria-expanded={openMenu === `discovered:${device.ip_address}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setCameraContextMenu(null);
+                    setOpenMenu((current) => (current === `discovered:${device.ip_address}` ? null : `discovered:${device.ip_address}`));
+                  }}
+                >
+                  <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                    <circle cx="8" cy="3.25" r="1.2" />
+                    <circle cx="8" cy="8" r="1.2" />
+                    <circle cx="8" cy="12.75" r="1.2" />
+                  </svg>
+                </button>
+                {openMenu === `discovered:${device.ip_address}` && (
+                  <div className="sidebar-layout-menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="is-danger"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        setDiscoveredDeviceToRemove(device);
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )}
+              </div>
+            </li>
+          ))}
+          </ul>
+        )}
+      </div>
     );
   };
 
@@ -1542,7 +1578,7 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
         onClick={() => setCameraListCollapsed((collapsed) => !collapsed)}
       >
         <span className="sidebar-section-label">Camera List</span>
-        <span className="sidebar-tree-count">{sidebarCameraList.length + sidebarDiscoveredCameraList.length}</span>
+        <span className="sidebar-tree-count">{sidebarCameraList.length}</span>
         <span className="sidebar-tree-toggle" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 6l6 6-6 6" />
@@ -1552,6 +1588,7 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
       {!cameraListCollapsed && (
         <div id="sidebar-camera-list-panel">
           {renderCameraList()}
+          {renderFoundCameras()}
         </div>
       )}
     </div>
