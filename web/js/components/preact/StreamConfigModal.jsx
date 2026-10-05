@@ -301,6 +301,7 @@ export function StreamConfigModal({
   cameraFolders = [],
   folderId = '',
   onFolderChange,
+  onSwitchToSubnetScan,
   onTestMotion,
   onSave,
   onClose,
@@ -513,6 +514,17 @@ export function StreamConfigModal({
             <p className="text-sm text-muted-foreground mt-1">
               {t('streamsConfig.subtitle')}
             </p>
+            {!isEditing && !isCloning && onSwitchToSubnetScan && (
+              <div className="mt-3 inline-flex rounded-md border border-border p-0.5 text-sm" role="tablist">
+                <button type="button" role="tab" aria-selected="true" className="px-3 py-1 rounded bg-primary text-primary-foreground">
+                  Known Address
+                </button>
+                <button type="button" role="tab" aria-selected="false" id="add-device-subnet-scan-tab"
+                  className="px-3 py-1 rounded text-muted-foreground hover:text-foreground" onClick={onSwitchToSubnetScan}>
+                  Subnet Scan
+                </button>
+              </div>
+            )}
           </div>
           <button
             onClick={onClose}

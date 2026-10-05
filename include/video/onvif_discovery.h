@@ -142,6 +142,15 @@ int add_onvif_device_as_stream(const onvif_device_info_t *device_info,
  * @param max_devices Maximum number of devices to return
  * @return Number of devices found, or -1 on error
  */
+/**
+ * Probe each address in an inclusive IPv4 range (host byte order) for ONVIF
+ * devices with unicast WS-Discovery; only replies from inside the range are
+ * returned.
+ * @return number of devices found, or -1 on error
+ */
+int discover_onvif_devices_in_range(uint32_t first, uint32_t last,
+                                    onvif_device_info_t *devices, int max_devices);
+
 int discover_onvif_devices(const char *network, onvif_device_info_t *devices,
                           int max_devices);
 

@@ -112,8 +112,8 @@ int get_discovered_onvif_devices(onvif_device_info_t *devices, int max_devices) 
 // socket. Cameras answer to the port the probe came from, and multicast
 // neither leaves nor re-enters a Docker bridge, so unicast probes on one
 // socket are what find cameras when LightNVR runs in a container.
-static int probe_network_for_onvif(uint32_t network_addr, uint32_t broadcast,
-                                   onvif_device_info_t *devices, int max_devices) {
+static int probe_hosts_for_onvif(uint32_t first_host, uint32_t last_host, bool send_group_probes,
+                                 onvif_device_info_t *devices, int max_devices) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         log_error("Failed to create discovery socket: %s", strerror(errno));
@@ -132,7 +132,7 @@ static int probe_network_for_onvif(uint32_t network_addr, uint32_t broadcast,
     char uuid[64];
     int sent = 0;
 
-    for (uint32_t host = network_addr + 1; host < broadcast && sent < ONVIF_UNICAST_MAX_HOSTS; host++) {
+    for (uint32_t host = first_host; host <= last_host && host != 0 && sent < ONVIF_UNICAST_MAX_HOSTS; host++) {
         generate_uuid(uuid, sizeof(uuid));
         int len = snprintf(message, sizeof(message), ONVIF_DISCOVERY_MSG, uuid);
         dest.sin_addr.s_addr = htonl(host);
@@ -142,10 +142,10 @@ static int probe_network_for_onvif(uint32_t network_addr, uint32_t broadcast,
     }
 
     // Broadcast and multicast still help when running on the host network
-    uint32_t group_targets[2] = { broadcast, 0 };
+    uint32_t group_targets[2] = { last_host + 1, 0 };
     inet_pton(AF_INET, "239.255.255.250", &group_targets[1]);
     group_targets[1] = ntohl(group_targets[1]);
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; send_group_probes && i < 2; i++) {
         generate_uuid(uuid, sizeof(uuid));
         int len = snprintf(message, sizeof(message), ONVIF_DISCOVERY_MSG, uuid);
         dest.sin_addr.s_addr = htonl(group_targets[i]);
@@ -190,6 +190,13 @@ static int probe_network_for_onvif(uint32_t network_addr, uint32_t broadcast,
         }
         if (info.ip_address[0] == '\0') {
             snprintf(info.ip_address, sizeof(info.ip_address), "%s", inet_ntoa(from.sin_addr));
+        }
+        // Range scans only report devices inside the requested range
+        if (!send_group_probes) {
+            uint32_t reply_ip = ntohl(from.sin_addr.s_addr);
+            if (reply_ip < first_host || reply_ip > last_host) {
+                continue;
+            }
         }
 
         bool duplicate = false;
@@ -285,7 +292,7 @@ int discover_onvif_devices(const char *network, onvif_device_info_t *devices,
     
     // If no candidates found, probe every host directly (plus broadcast and multicast)
     if (candidate_count == 0) {
-        count = probe_network_for_onvif(network_addr, broadcast, devices, max_devices);
+        count = probe_hosts_for_onvif(network_addr + 1, broadcast - 1, true, devices, max_devices);
         if (count < 0) {
             return -1;
         }
@@ -512,4 +519,15 @@ int try_direct_http_discovery(char candidate_ips[][16], int candidate_count,
 static size_t onvif_curl_write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     // Just discard the data, we only care if the request succeeds
     return size * nmemb;
+}
+
+// Probe every address in [first, last] (host byte order) with a unicast
+// WS-Discovery probe and return the ONVIF devices that answer from inside
+// that range. Used by the subnet scan.
+int discover_onvif_devices_in_range(uint32_t first, uint32_t last,
+                                    onvif_device_info_t *devices, int max_devices) {
+    if (!devices || max_devices <= 0 || first > last) {
+        return -1;
+    }
+    return probe_hosts_for_onvif(first, last, false, devices, max_devices);
 }

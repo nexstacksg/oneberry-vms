@@ -10,9 +10,11 @@ import { ContentLoader } from './LoadingIndicator.jsx';
 import { StreamDeleteModal } from './StreamDeleteModal.jsx';
 import { StreamBulkActionModal } from './StreamBulkActionModal.jsx';
 import { StreamConfigModal } from './StreamConfigModal.jsx';
+import { SubnetScanModal } from './SubnetScanModal.jsx';
 import { HealthView } from './HealthView.jsx';
 import { validateSession } from '../../utils/auth-utils.js';
 import { obfuscateUrlCredentials, urlHasCredentials } from '../../utils/url-utils.js';
+import { buildDiscoveredStreamPayload } from '../../utils/discovered-stream-utils.js';
 import { detectedInfoToFormFields, formatDetectedSummary, isProbeableStreamUrl } from '../../utils/stream-probe-utils.js';
 import {
   VIDEO_FPS_PRESETS,
@@ -88,28 +90,6 @@ function buildStreamFormState(stream, motion, {
     tags: stream.tags || '',
     motionTriggerSource: stream.motion_trigger_source || ''
   };
-}
-
-function applyCredentialsToStreamUrl(url, username, password) {
-  const rawUrl = String(url || '').trim();
-  const user = String(username || '').trim();
-  const pass = String(password || '');
-  if (!rawUrl || (!user && !pass)) {
-    return rawUrl;
-  }
-
-  try {
-    const parsed = new URL(rawUrl);
-    if (user) parsed.username = user;
-    if (pass) parsed.password = pass;
-    return parsed.toString();
-  } catch {
-    const protocolMatch = rawUrl.match(/^([a-z][a-z0-9+.-]*:\/\/)(.*)$/i);
-    if (!protocolMatch) return rawUrl;
-    const credential = `${encodeURIComponent(user)}${pass ? `:${encodeURIComponent(pass)}` : ''}@`;
-    const withoutExistingCredentials = protocolMatch[2].replace(/^[^/@]+@/, '');
-    return `${protocolMatch[1]}${credential}${withoutExistingCredentials}`;
-  }
 }
 
 function getCredentialsFromStreamUrl(url) {
@@ -304,6 +284,7 @@ export function StreamsView() {
     return localStorage.getItem('oneberry.streamsViewMode') === 'grid' ? 'grid' : 'table';
   });
   const [modalVisible, setModalVisible] = useState(false);
+  const [subnetScanVisible, setSubnetScanVisible] = useState(false);
   const [onvifModalVisible, setOnvifModalVisible] = useState(false);
   const [showCustomNameInput, setShowCustomNameInput] = useState(false);
   const [isAddingStream, setIsAddingStream] = useState(false);
@@ -1836,48 +1817,18 @@ export function StreamsView() {
     const { width, height } = parseResolutionValue(onvifResolution);
     const fps = parseFpsValue(onvifFps);
     const isOnvifProfile = !selectedProfile.isRtsp;
-    const streamUrl = applyCredentialsToStreamUrl(
-      selectedProfile.stream_uri,
-      onvifCredentials.username,
-      onvifCredentials.password
-    );
-    const secondaryStreamUrl = selectedSecondaryProfile?.stream_uri
-      ? applyCredentialsToStreamUrl(
-          selectedSecondaryProfile.stream_uri,
-          onvifCredentials.username,
-          onvifCredentials.password
-        )
-      : '';
-
-    // Prepare stream data
-    const streamData = {
-      name: customStreamName.trim(),
-      // ONVIF profiles expose the media endpoint as `stream_uri`, while our
-      // backend `Stream` model expects this value under the generic `url` field.
-      // This mapping intentionally translates the ONVIF profile shape to the
-      // stream configuration shape expected by the API.
-      url: streamUrl,
-      secondary_url: secondaryStreamUrl,
-      enabled: true,
-      streaming_enabled: true,
+    const streamData = buildDiscoveredStreamPayload({
+      name: customStreamName,
+      streamUrl: selectedProfile.stream_uri,
+      secondaryUrl: selectedSecondaryProfile?.stream_uri || '',
+      username: onvifCredentials.username,
+      password: onvifCredentials.password,
+      isOnvif: isOnvifProfile,
+      onvifProfile: selectedProfile.token || selectedProfile.name || '',
       width,
       height,
       fps,
-      protocol: '0', // TCP
-      priority: '5', // Medium
-      segment_duration: 60,
-      record: true,
-      record_audio: false,
-      backchannel_enabled: false,
-      retention_days: 1,
-      detection_retention_days: 1,
-      // Backend expects camelCase key 'isOnvif'
-      isOnvif: isOnvifProfile,
-      onvif_username: isOnvifProfile ? onvifCredentials.username : '',
-      onvif_password: isOnvifProfile ? onvifCredentials.password : '',
-      onvif_profile: isOnvifProfile ? (selectedProfile.token || selectedProfile.name || '') : '',
-      onvif_port: 0
-    };
+    });
 
     // Use mutation to save stream
     saveStreamMutation.mutate({ ...streamData, __mode: 'create' }, {
@@ -2443,6 +2394,14 @@ export function StreamsView() {
                     {t('streams.discoverNetworkCameras')}
                   </button>
                   <button
+                      id="subnet-scan-open-btn"
+                      className="btn-secondary focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
+                      onClick={() => setSubnetScanVisible(true)}
+                      title="Scan an IP range for ONVIF and RTSP cameras"
+                  >
+                    Subnet Scan
+                  </button>
+                  <button
                       id="add-stream-btn"
                       className="btn-primary focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
                       onClick={openAddStreamModal}
@@ -2945,6 +2904,7 @@ export function StreamsView() {
           cameraFolders={cameraFolders}
           folderId={newCameraFolderId}
           onFolderChange={setNewCameraFolderId}
+          onSwitchToSubnetScan={canCreateStreams ? () => { closeModal(); setSubnetScanVisible(true); } : undefined}
           onTestMotion={triggerTestMotionEvent}
           onSave={handleSubmit}
           onClose={closeModal}
@@ -2955,6 +2915,13 @@ export function StreamsView() {
         />
       )}
 
+      <SubnetScanModal
+        isOpen={subnetScanVisible}
+        onClose={() => setSubnetScanVisible(false)}
+        onSwitchToKnownAddress={() => { setSubnetScanVisible(false); openAddStreamModal(); }}
+        existingNames={streams.map(stream => stream.name)}
+        onCamerasAdded={() => queryClient.invalidateQueries({ queryKey: ['streams'] })}
+      />
       {onvifModalVisible && (
         <div id="onvif-modal" className="content-modal-backdrop fixed inset-0 bg-black/60 flex items-center justify-center z-50 transition-opacity duration-300 p-4">
           <div className="bg-card text-card-foreground rounded-lg shadow-xl w-full max-w-[1440px] max-h-[94vh] overflow-hidden flex flex-col">

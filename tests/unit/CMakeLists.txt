@@ -105,6 +105,9 @@ endmacro()
 # ====================================================================
 add_layer1_test(test_storage_pressure)
 
+# Layer 1: subnet-scan IP range validation (pure logic)
+add_layer1_test(test_ip_range)
+
 # ====================================================================
 # Layer 2: test_storage_retention_sqlite
 # Integration test — runs real SQL queries via db_core / db_recordings.

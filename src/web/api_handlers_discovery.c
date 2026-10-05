@@ -595,6 +595,167 @@ static bool rtsp_should_try_candidate_on_pass(const rtsp_path_candidate_t *candi
     return !is_generic;
 }
 
+int discovery_rtsp_options_check(const char *ip, int port, int timeout_ms,
+                                 char *server_header, size_t server_header_size) {
+    if (server_header && server_header_size > 0) {
+        server_header[0] = '\0';
+    }
+    struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
+    if (!ip || port <= 0 || port > 65535 || inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
+        return -1;
+    }
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return -1;
+    }
+    struct timeval tv = { .tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    // Non-blocking connect so an unreachable host cannot stall the caller
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    int rc = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) {
+        close(sock);
+        return -1;
+    }
+    if (rc < 0) {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(sock, &wfds);
+        struct timeval ctv = tv;
+        int so_error = 0;
+        socklen_t len = sizeof(so_error);
+        if (select(sock + 1, NULL, &wfds, NULL, &ctv) <= 0 ||
+            getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) != 0 || so_error != 0) {
+            close(sock);
+            return -1;
+        }
+    }
+    fcntl(sock, F_SETFL, flags);
+
+    char request[256];
+    int request_len = snprintf(request, sizeof(request),
+                               "OPTIONS rtsp://%s:%d/ RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: LightNVR\r\n\r\n",
+                               ip, port);
+    char reply[2048];
+    ssize_t received = -1;
+    if (send(sock, request, (size_t)request_len, MSG_NOSIGNAL) == request_len) {
+        received = recv(sock, reply, sizeof(reply) - 1, 0);
+    }
+    close(sock);
+    if (received <= 0) {
+        return 0;  // port open but no RTSP reply
+    }
+    reply[received] = '\0';
+    if (strncmp(reply, "RTSP/1.", 7) != 0) {
+        return 0;
+    }
+
+    const char *server = strcasestr(reply, "\nServer:");
+    if (server && server_header && server_header_size > 0) {
+        server += strlen("\nServer:");
+        while (*server == ' ') server++;
+        size_t n = strcspn(server, "\r\n");
+        if (n >= server_header_size) n = server_header_size - 1;
+        memcpy(server_header, server, n);
+        server_header[n] = '\0';
+    }
+    return 1;
+}
+
+rtsp_probe_result_t discovery_find_rtsp_stream(const char *ip, int port,
+                                               const char *username, const char *password,
+                                               const char *manufacturer, const char *model,
+                                               const volatile bool *cancel,
+                                               rtsp_found_stream_t *out) {
+    memset(out, 0, sizeof(*out));
+    bool has_device_hint = (manufacturer && manufacturer[0] != '\0' && strcasecmp(manufacturer, "Unknown") != 0) ||
+                           (model && model[0] != '\0' && strcasecmp(model, "Unknown") != 0);
+    int pass_count = has_device_hint ? 3 : 2;
+    const char *family = NULL;
+    bool busy = false;
+    bool unreachable = false;
+
+    for (int pass = 0; pass < pass_count; pass++) {
+        for (int i = 0; COMMON_RTSP_PATHS[i].path != NULL; i++) {
+            const rtsp_path_candidate_t *candidate = &COMMON_RTSP_PATHS[i];
+            if (!rtsp_should_try_candidate_on_pass(candidate, manufacturer, model, has_device_hint, pass)) {
+                continue;
+            }
+            // Once a path works, only look for the rest of that vendor family
+            if (family && strcmp(candidate->family, family) != 0) {
+                continue;
+            }
+            if (cancel && *cancel) {
+                return RTSP_PROBE_CANCELLED;
+            }
+
+            char raw_url[MAX_URL_LENGTH];
+            char credentialed_url[MAX_URL_LENGTH];
+            char error_msg[256] = {0};
+            rtsp_stream_info_t info;
+            memset(&info, 0, sizeof(info));
+            build_rtsp_url(raw_url, sizeof(raw_url), ip, port, candidate->path);
+            if (url_apply_credentials(raw_url, username, password, credentialed_url, sizeof(credentialed_url)) != 0) {
+                snprintf(credentialed_url, sizeof(credentialed_url), "%s", raw_url);
+            }
+
+            if (validate_rtsp_stream(credentialed_url, &info, error_msg, sizeof(error_msg)) == 0) {
+                if (!family) {
+                    family = candidate->family;
+                    out->width = info.width;
+                    out->height = info.height;
+                    out->fps = info.fps;
+                    snprintf(out->codec, sizeof(out->codec), "%.31s", info.codec);
+                }
+                bool secondary = candidate->role && strcmp(candidate->role, "secondary") == 0;
+                if (!secondary && out->main_url[0] == '\0') {
+                    snprintf(out->main_url, sizeof(out->main_url), "%s", raw_url);
+                } else if (secondary && out->sub_url[0] == '\0') {
+                    snprintf(out->sub_url, sizeof(out->sub_url), "%s", raw_url);
+                }
+                continue;
+            }
+
+            if (!family && strstr(error_msg, "401")) {
+                snprintf(out->message, sizeof(out->message), "%s", "The camera rejected the username or password");
+                return RTSP_PROBE_AUTH_FAILED;
+            }
+            // FFmpeg reports codes like 453 Not Enough Bandwidth as a generic 4XX
+            if (strstr(error_msg, "4XX") || strstr(error_msg, "453")) {
+                busy = true;
+            }
+            if (strcasestr(error_msg, "Connection refused") || strcasestr(error_msg, "timed out") ||
+                strcasestr(error_msg, "No route")) {
+                unreachable = true;
+            }
+        }
+    }
+
+    if (out->main_url[0] == '\0' && out->sub_url[0] != '\0') {
+        snprintf(out->main_url, sizeof(out->main_url), "%s", out->sub_url);
+        out->sub_url[0] = '\0';
+    }
+    if (out->main_url[0] != '\0') {
+        return RTSP_PROBE_FOUND;
+    }
+    if (busy) {
+        snprintf(out->message, sizeof(out->message), "%s",
+                 "The camera refused the connection (it may have too many viewers connected)");
+        return RTSP_PROBE_BUSY;
+    }
+    if (unreachable) {
+        snprintf(out->message, sizeof(out->message), "%s", "Could not connect to the camera");
+        return RTSP_PROBE_UNREACHABLE;
+    }
+    snprintf(out->message, sizeof(out->message), "%s",
+             "RTSP server found, but none of the known stream paths worked; add it manually with its RTSP path");
+    return RTSP_PROBE_NO_PATH;
+}
+
 static char *build_discovery_status_json_locked(void) {
     cJSON *root = cJSON_CreateObject();
     cJSON *array = root ? cJSON_AddArrayToObject(root, "devices") : NULL;

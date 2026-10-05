@@ -16,6 +16,7 @@
 #include "web/api_handlers_health.h"
 #include "web/api_handlers_settings.h"
 #include "web/api_handlers_camera_folders.h"
+#include "web/api_handlers_subnet_scan.h"
 #include "web/api_handlers_system.h"
 #include "web/api_handlers_zones.h"
 #include "web/api_handlers_motion.h"
@@ -192,6 +193,10 @@ int register_all_libuv_handlers(http_server_handle_t server) {
     // Universal camera discovery API
     http_server_register_handler(server, "/api/discovery/cameras", "POST", handle_post_discover_cameras);
     http_server_register_handler(server, "/api/discovery/cameras/status", "GET", handle_get_discover_cameras_status);
+    http_server_register_handler(server, "/api/discovery/subnet-scan", "POST", handle_post_subnet_scan);
+    http_server_register_handler(server, "/api/discovery/subnet-scan", "GET", handle_get_subnet_scan);
+    http_server_register_handler(server, "/api/discovery/subnet-scan", "DELETE", handle_delete_subnet_scan);
+    http_server_register_handler(server, "/api/discovery/subnet-scan/authenticate", "POST", handle_post_subnet_scan_authenticate);
     http_server_register_handler(server, "/api/discovery/rtsp/validate", "POST", handle_post_validate_rtsp_device);
 
     // Recordings API (backend-agnostic handlers)
