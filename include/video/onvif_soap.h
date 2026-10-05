@@ -37,5 +37,13 @@ char *onvif_create_security_header(const char *username, const char *password);
  */
 void onvif_log_soap_fault(char *response, size_t response_len, const char *context);
 
+/**
+ * Last SOAP fault seen on this thread ("Subcode: Reason"), or "" if none since
+ * onvif_clear_last_fault(). Lets API handlers tell the user why a camera
+ * rejected a request (e.g. ter:NotAuthorized) instead of returning empty data.
+ */
+const char *onvif_get_last_fault(void);
+void onvif_clear_last_fault(void);
+
 #endif /* ONVIF_SOAP_H */
 

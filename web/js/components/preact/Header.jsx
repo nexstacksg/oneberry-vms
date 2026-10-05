@@ -151,6 +151,9 @@ const SidebarCameraRow = memo(({
   </li>
 ));
 
+const isKnownValue = (value) => Boolean(value) && value !== 'Unknown' && value !== 'NetworkVideoTransmitter';
+const hasKnownModel = (device) => isKnownValue(device?.model);
+
 const getDiscoveredDeviceKey = (device) => (
   String(device?.ip_address || device?.device_service || device?.endpoint || device?.name || '').trim()
 );
@@ -925,7 +928,7 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
         body: JSON.stringify({
           network: discoveryNetwork,
           include_onvif: true,
-          include_rtsp: true,
+          include_rtsp: false,
         }),
         timeout: 15000,
         retries: 0,
@@ -1518,12 +1521,13 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
               <a
                 href={`streams.html?discover=1&camera=${encodeURIComponent(device.ip_address)}`}
                 className="sidebar-camera-link sidebar-network-camera-link"
-                title={`${device.ip_address} - Discovered network camera. Select to add.`}
+                title={`${device.ip_address}${hasKnownModel(device) ? ` - ${[device.manufacturer, device.model].filter(isKnownValue).join(' ')}` : ''} - Found on the network. Click to add.`}
                 onClick={(event) => openDiscoveredCameraInStreams(event, device)}
               >
                 <span className="sidebar-camera-status is-warning" aria-hidden="true"></span>
                 <TreeIcon type="camera" />
                 <span className="sidebar-camera-name">{device.name || device.ip_address}</span>
+                {hasKnownModel(device) && <span className="sidebar-camera-auth-badge">{device.model}</span>}
               </a>
               <div className="sidebar-layout-menu-wrap sidebar-camera-menu-wrap" onClick={(event) => event.stopPropagation()}>
                 <button

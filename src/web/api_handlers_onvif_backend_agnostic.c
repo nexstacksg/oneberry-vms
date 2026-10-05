@@ -15,6 +15,7 @@
 #include "core/config.h"
 #include "core/url_utils.h"
 #include "video/onvif_discovery.h"
+#include "video/onvif_soap.h"
 #include "video/stream_manager.h"
 #include <cjson/cJSON.h>
 
@@ -373,6 +374,29 @@ void handle_post_discover_onvif_devices(const http_request_t *req, http_response
 /**
  * @brief Backend-agnostic handler for GET /api/onvif/device/profiles
  */
+// If the camera answered the last ONVIF request with a SOAP fault, send the
+// user a clear error for it and return true. A rejected login usually means
+// the user is not in the camera's separate ONVIF user list.
+static bool respond_with_onvif_fault(http_response_t *res) {
+    const char *fault = onvif_get_last_fault();
+    if (fault[0] == '\0') {
+        return false;
+    }
+    char message[512];
+    if (strcasestr(fault, "NotAuthorized") || strcasestr(fault, "not authorized")) {
+        snprintf(message, sizeof(message),
+                 "The camera rejected this username and password for ONVIF. Many cameras "
+                 "(e.g. Axis, Hikvision) keep a separate list of ONVIF users: add this user "
+                 "as an ONVIF user in the camera's settings, then try again.");
+        // Not 401: the web UI treats 401 as an expired LightNVR session and logs out
+        http_response_set_json_error(res, 422, message);
+    } else {
+        snprintf(message, sizeof(message), "The camera returned an ONVIF error: %s", fault);
+        http_response_set_json_error(res, 502, message);
+    }
+    return true;
+}
+
 void handle_get_onvif_device_profiles(const http_request_t *req, http_response_t *res) {
     log_info("Handling GET /api/onvif/device/profiles request");
 
@@ -409,6 +433,7 @@ void handle_get_onvif_device_profiles(const http_request_t *req, http_response_t
 
     // Get device profiles
     onvif_profile_t profiles[16];
+    onvif_clear_last_fault();
     int count = get_onvif_device_profiles(device_url,
                                          username[0] ? username : NULL,
                                          password[0] ? password : NULL,
@@ -417,6 +442,12 @@ void handle_get_onvif_device_profiles(const http_request_t *req, http_response_t
     if (count < 0) {
         log_error("Failed to get ONVIF device profiles");
         http_response_set_json_error(res, 500, "Failed to get ONVIF device profiles");
+        return;
+    }
+
+    // No profiles because the camera refused the request: say why instead of
+    // returning an empty list the UI cannot explain
+    if (count == 0 && respond_with_onvif_fault(res)) {
         return;
     }
 
@@ -663,11 +694,15 @@ void handle_post_test_onvif_connection(const http_request_t *req, http_response_
     }
 
     // Test ONVIF connection
+    onvif_clear_last_fault();
     int result = test_onvif_connection(url, username, password);
     cJSON_Delete(root);
 
     if (result != 0) {
         log_error("Failed to connect to ONVIF device");
+        if (respond_with_onvif_fault(res)) {
+            return;
+        }
         http_response_set_json_error(res, 500, "Failed to connect to ONVIF device");
         return;
     }

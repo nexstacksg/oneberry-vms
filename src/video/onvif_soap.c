@@ -155,6 +155,16 @@ static ezxml_t find_with_ns(ezxml_t parent, const char *local_name,
     return ezxml_child(parent, local_name);
 }
 
+static __thread char t_last_fault[256];
+
+const char *onvif_get_last_fault(void) {
+    return t_last_fault;
+}
+
+void onvif_clear_last_fault(void) {
+    t_last_fault[0] = '\0';
+}
+
 void onvif_log_soap_fault(char *response, size_t response_len, const char *context) {
     if (!response || response_len == 0) return;
 
@@ -236,6 +246,11 @@ void onvif_log_soap_fault(char *response, size_t response_len, const char *conte
         ezxml_t faultstring = ezxml_child(fault, "faultstring");
         if (faultstring) reason_str = ezxml_txt(faultstring);
     }
+
+    snprintf(t_last_fault, sizeof(t_last_fault), "%s%s%s",
+             (subcode_str && subcode_str[0] != '\0') ? subcode_str : (code_str ? code_str : ""),
+             (reason_str && reason_str[0] != '\0') ? ": " : "",
+             (reason_str && reason_str[0] != '\0') ? reason_str : "");
 
     /* Build and log the message */
     if (code_str && code_str[0] != '\0') {

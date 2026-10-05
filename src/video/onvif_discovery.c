@@ -104,12 +104,115 @@ int get_discovered_onvif_devices(onvif_device_info_t *devices, int max_devices) 
     return count;
 }
 
+#define ONVIF_UNICAST_MAX_HOSTS 1024
+#define ONVIF_REPLY_WAIT_MS 3000
+
+// Send a WS-Discovery probe directly to every host in the network (plus the
+// broadcast and multicast addresses) and read ProbeMatch replies on the same
+// socket. Cameras answer to the port the probe came from, and multicast
+// neither leaves nor re-enters a Docker bridge, so unicast probes on one
+// socket are what find cameras when LightNVR runs in a container.
+static int probe_network_for_onvif(uint32_t network_addr, uint32_t broadcast,
+                                   onvif_device_info_t *devices, int max_devices) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        log_error("Failed to create discovery socket: %s", strerror(errno));
+        return -1;
+    }
+    int enable = 1;
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &enable, sizeof(enable));
+
+    struct sockaddr_in bind_addr = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_ANY) };
+    if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+        log_warn("Failed to bind discovery socket: %s", strerror(errno));
+    }
+
+    struct sockaddr_in dest = { .sin_family = AF_INET, .sin_port = htons(3702) };
+    char message[1024];
+    char uuid[64];
+    int sent = 0;
+
+    for (uint32_t host = network_addr + 1; host < broadcast && sent < ONVIF_UNICAST_MAX_HOSTS; host++) {
+        generate_uuid(uuid, sizeof(uuid));
+        int len = snprintf(message, sizeof(message), ONVIF_DISCOVERY_MSG, uuid);
+        dest.sin_addr.s_addr = htonl(host);
+        if (sendto(sock, message, (size_t)len, 0, (struct sockaddr *)&dest, sizeof(dest)) >= 0) {
+            sent++;
+        }
+    }
+
+    // Broadcast and multicast still help when running on the host network
+    uint32_t group_targets[2] = { broadcast, 0 };
+    inet_pton(AF_INET, "239.255.255.250", &group_targets[1]);
+    group_targets[1] = ntohl(group_targets[1]);
+    for (int i = 0; i < 2; i++) {
+        generate_uuid(uuid, sizeof(uuid));
+        int len = snprintf(message, sizeof(message), ONVIF_DISCOVERY_MSG, uuid);
+        dest.sin_addr.s_addr = htonl(group_targets[i]);
+        sendto(sock, message, (size_t)len, 0, (struct sockaddr *)&dest, sizeof(dest));
+    }
+    log_info("Sent ONVIF discovery probes to %d hosts plus broadcast and multicast", sent);
+
+    int count = 0;
+    char buffer[16384];
+    struct timeval deadline, now;
+    gettimeofday(&deadline, NULL);
+    deadline.tv_sec += ONVIF_REPLY_WAIT_MS / 1000;
+
+    while (count < max_devices) {
+        gettimeofday(&now, NULL);
+        long remaining_ms = (deadline.tv_sec - now.tv_sec) * 1000 + (deadline.tv_usec - now.tv_usec) / 1000;
+        if (remaining_ms <= 0) {
+            break;
+        }
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(sock, &fds);
+        struct timeval tv = { .tv_sec = remaining_ms / 1000, .tv_usec = (remaining_ms % 1000) * 1000 };
+        if (select(sock + 1, &fds, NULL, NULL, &tv) <= 0) {
+            break;
+        }
+
+        struct sockaddr_in from;
+        socklen_t from_len = sizeof(from);
+        ssize_t n = recvfrom(sock, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&from, &from_len);
+        if (n <= 0) {
+            continue;
+        }
+        buffer[n] = '\0';
+        if (!strstr(buffer, "ProbeMatch")) {
+            continue;  // our own multicast probe echoed back, or unrelated traffic
+        }
+
+        onvif_device_info_t info;
+        if (parse_device_info(buffer, &info) != 0) {
+            continue;
+        }
+        if (info.ip_address[0] == '\0') {
+            snprintf(info.ip_address, sizeof(info.ip_address), "%s", inet_ntoa(from.sin_addr));
+        }
+
+        bool duplicate = false;
+        for (int i = 0; i < count; i++) {
+            if (strcmp(devices[i].ip_address, info.ip_address) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            devices[count++] = info;
+            log_info("ONVIF device found: %s (%s)", info.ip_address, info.device_service);
+        }
+    }
+
+    close(sock);
+    return count;
+}
+
 // Discover ONVIF devices on a specific network
 int discover_onvif_devices(const char *network, onvif_device_info_t *devices,
                           int max_devices) {
     uint32_t base_addr, subnet_mask;
-    char ip_addr[16];
-    struct in_addr addr;
     int count = 0;
     char selected_network[64] = {0};
     int discovery_sock = -1;
@@ -180,66 +283,11 @@ int discover_onvif_devices(const char *network, onvif_device_info_t *devices,
 
     log_info("Skipping slow TCP pre-scan; using UDP broadcast and multicast for ONVIF discovery");
     
-    // If no candidates found, try broadcast and multicast
+    // If no candidates found, probe every host directly (plus broadcast and multicast)
     if (candidate_count == 0) {
-        log_info("No devices with open ports found, trying broadcast and multicast");
-        
-        // Create a socket for discovery probes
-        discovery_sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (discovery_sock < 0) {
-            log_error("Failed to create discovery socket: %s", strerror(errno));
+        count = probe_network_for_onvif(network_addr, broadcast, devices, max_devices);
+        if (count < 0) {
             return -1;
-        }
-
-        // Set socket options for broadcast
-        if (setsockopt(discovery_sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enabled, sizeof(broadcast_enabled)) < 0) {
-            log_error("Failed to set SO_BROADCAST option: %s", strerror(errno));
-            close(discovery_sock);
-            return -1;
-        }
-
-        // Try binding to any interface to improve reliability
-        struct sockaddr_in bind_addr;
-        memset(&bind_addr, 0, sizeof(bind_addr));
-        bind_addr.sin_family = AF_INET;
-        bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        bind_addr.sin_port = htons(0);  // Use any available port for sending
-
-        if (bind(discovery_sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
-            log_warn("Failed to bind discovery socket: %s", strerror(errno));
-            // Continue anyway, might still work
-        }
-
-        // Set up destination address structure
-        struct sockaddr_in dest_addr;
-        memset(&dest_addr, 0, sizeof(dest_addr));
-        dest_addr.sin_family = AF_INET;
-        dest_addr.sin_port = htons(3702);  // WS-Discovery port
-
-        // Send probes to broadcast address
-        addr.s_addr = htonl(broadcast);
-        snprintf(ip_addr, sizeof(ip_addr), "%s", inet_ntoa(addr));
-        log_info("Sending discovery probes to broadcast address: %s", ip_addr);
-
-        dest_addr.sin_addr.s_addr = htonl(broadcast);
-        send_all_discovery_probes(discovery_sock, ip_addr, &dest_addr);
-
-        // Send to multicast address
-        log_info("Sending discovery probes to ONVIF multicast address: 239.255.255.250");
-        inet_pton(AF_INET, "239.255.255.250", &dest_addr.sin_addr);
-        send_all_discovery_probes(discovery_sock, "239.255.255.250", &dest_addr);
-
-        // Close the sending socket
-        close(discovery_sock);
-        
-        // Try to receive responses
-        log_info("Waiting for discovery responses...");
-        count = receive_discovery_responses(devices, max_devices);
-        
-        // If no devices found, try with a slightly shorter timeout to speed up the process
-        if (count == 0) {
-            log_info("No devices found with standard timeout, trying with shorter timeout");
-            count = receive_extended_discovery_responses(devices, max_devices, 1, 2); // 1 sec timeout, 2 attempts
         }
     } else {
         // Create a socket for discovery probes

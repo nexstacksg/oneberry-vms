@@ -1285,7 +1285,7 @@ export function StreamsView() {
     onvifDiscoveryMutation.mutate({
       network: discoveryNetwork,
       include_onvif: true,
-      include_rtsp: true
+      include_rtsp: false
     });
   };
 
@@ -1673,9 +1673,13 @@ export function StreamsView() {
             'X-Device-Manufacturer': device.manufacturer || '',
             'X-Device-Model': device.model || ''
           }
-        }).then(response => {
+        }).then(async response => {
           if (!response.ok) {
-            throw new Error(`HTTP error ${response.status}`);
+            // The server explains camera-side failures (e.g. ONVIF login rejected) in {"error": "..."}
+            const body = await response.json().catch(() => null);
+            const error = new Error(body?.error || `HTTP error ${response.status}`);
+            error.status = response.status;
+            throw error;
           }
           return response.json();
         });
@@ -1724,7 +1728,7 @@ export function StreamsView() {
         return;
       }
 
-      showStatusMessage(t('streams.errorLoadingDeviceProfiles', { message: error.message }), 'error', 5000);
+      showStatusMessage(t('streams.errorLoadingDeviceProfiles', { message: error.message }), 'error', 12000);
       setIsLoadingProfiles(false);
     }
   });
@@ -3023,7 +3027,9 @@ export function StreamsView() {
                               <div className="mt-2 grid gap-1 text-sm text-muted-foreground md:grid-cols-3">
                                 <span>{t('streams.manufacturer')}: <span className="text-foreground">{device.manufacturer || t('common.unknown')}</span></span>
                                 <span>{t('streams.model')}: <span className="text-foreground">{device.model || t('common.unknown')}</span></span>
-                                <span>{t('streams.rtspPorts')}: <span className="text-foreground">{ports.length ? ports.join(', ') : t('common.unknown')}</span></span>
+                                {ports.length > 0 && (
+                                  <span>{t('streams.rtspPorts')}: <span className="text-foreground">{ports.join(', ')}</span></span>
+                                )}
                               </div>
                             </div>
                             <div className="flex items-center gap-2 sm:flex-shrink-0">

@@ -51,6 +51,32 @@ static char* extract_xml_content(const char *xml, const char *tag_start, const c
 }
 
 // Parse ONVIF device information from discovery response
+// Read one ONVIF scope value, e.g. key "hardware" from
+// "onvif://www.onvif.org/hardware/P3245-LV", decoding %XX escapes.
+// Returns true if found.
+static bool read_onvif_scope(const char *response, const char *key, char *out, size_t out_size) {
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "onvif://www.onvif.org/%s/", key);
+    const char *p = strstr(response, prefix);
+    if (!p || out_size == 0) {
+        return false;
+    }
+    p += strlen(prefix);
+
+    size_t n = 0;
+    while (*p && !isspace((unsigned char)*p) && *p != '<' && n < out_size - 1) {
+        if (p[0] == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
+            char hex[3] = { p[1], p[2], '\0' };
+            out[n++] = (char)strtol(hex, NULL, 16);
+            p += 3;
+        } else {
+            out[n++] = *p++;
+        }
+    }
+    out[n] = '\0';
+    return n > 0;
+}
+
 int parse_device_info(const char *response, onvif_device_info_t *device_info) {
     // This is a more robust implementation for parsing ONVIF discovery responses
     // without using a full XML parser
@@ -172,6 +198,23 @@ int parse_device_info(const char *response, onvif_device_info_t *device_info) {
         if (strstr(types, "NetworkVideoTransmitter")) {
             strncpy(device_info->model, "NetworkVideoTransmitter", sizeof(device_info->model) - 1);
             device_info->model[sizeof(device_info->model) - 1] = '\0';
+        }
+    }
+
+    // Most cameras advertise their model and maker in the probe scopes
+    char scope[64];
+    if (read_onvif_scope(response, "hardware", scope, sizeof(scope))) {
+        snprintf(device_info->model, sizeof(device_info->model), "%s", scope);
+    }
+    if (read_onvif_scope(response, "manufacturer", scope, sizeof(scope)) ||
+        read_onvif_scope(response, "mfr", scope, sizeof(scope))) {
+        snprintf(device_info->manufacturer, sizeof(device_info->manufacturer), "%s", scope);
+    } else if (read_onvif_scope(response, "name", scope, sizeof(scope))) {
+        // e.g. name "AXIS P3245-LV": the first word is usually the maker
+        char *space = strchr(scope, ' ');
+        if (space) {
+            *space = '\0';
+            snprintf(device_info->manufacturer, sizeof(device_info->manufacturer), "%s", scope);
         }
     }
     

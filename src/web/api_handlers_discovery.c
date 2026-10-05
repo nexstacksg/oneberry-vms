@@ -674,7 +674,9 @@ void handle_post_discover_cameras(const http_request_t *req, http_response_t *re
 
     const char *requested_network = cJSON_IsString(network_json) ? network_json->valuestring : "auto";
     bool include_onvif = !cJSON_IsBool(include_onvif_json) || cJSON_IsTrue(include_onvif_json);
-    bool include_rtsp = !cJSON_IsBool(include_rtsp_json) || cJSON_IsTrue(include_rtsp_json);
+    // Discovery is ONVIF-only unless a caller explicitly asks for the RTSP port scan;
+    // RTSP-only cameras are added manually
+    bool include_rtsp = cJSON_IsTrue(include_rtsp_json);
 
     char scan_network[64];
     if (resolve_scan_network(requested_network, scan_network, sizeof(scan_network)) != 0) {
