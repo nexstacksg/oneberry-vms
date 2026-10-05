@@ -1526,6 +1526,18 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
     });
   }, []);
 
+  // Open the Add Camera form with this folder selected; the Streams page
+  // files the new camera into it after it is saved
+  const addNewCameraToFolder = useCallback((folder, event) => {
+    setOpenMenu(null);
+    setCollapsedFolderIds((previous) => {
+      const next = new Set(previous);
+      next.delete(folder.id);
+      return next;
+    });
+    navigateToAppPage(`streams.html?add=1&folder=${encodeURIComponent(folder.id)}`, event);
+  }, []);
+
   const openFolderCameraPicker = useCallback((folder) => {
     setOpenMenu(null);
     setFolderPicker({ folderId: folder.id, selected: new Set(folder.cameras || []) });
@@ -1680,7 +1692,10 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
               </button>
               {openMenu === menuKey && (
                 <div className="sidebar-layout-menu" role="menu">
-                  <button type="button" role="menuitem" onClick={() => openFolderCameraPicker(folder)}>Add cameras</button>
+                  {isAdmin && !demoMode && (
+                    <button type="button" role="menuitem" onClick={(event) => addNewCameraToFolder(folder, event)}>Add new camera</button>
+                  )}
+                  <button type="button" role="menuitem" onClick={() => openFolderCameraPicker(folder)}>Move cameras here</button>
                   <button
                     type="button"
                     role="menuitem"
@@ -2254,7 +2269,7 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
         >
           <div className="bg-card text-card-foreground rounded-lg shadow-xl p-6 max-w-md w-full mx-4" role="dialog" aria-modal="true" aria-labelledby="folder-picker-title">
             <h3 id="folder-picker-title" className="text-base font-semibold mb-1">
-              Add cameras to "{cameraFolders.find((folder) => folder.id === folderPicker.folderId)?.name}"
+              Move cameras to "{cameraFolders.find((folder) => folder.id === folderPicker.folderId)?.name}"
             </h3>
             <p className="text-sm text-muted-foreground mb-4">
               Checked cameras are shown in this folder. A camera can only be in one folder.

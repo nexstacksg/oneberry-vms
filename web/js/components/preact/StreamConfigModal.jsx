@@ -298,6 +298,9 @@ export function StreamConfigModal({
   onThresholdChange,
   onTestUrl,
   urlProbe = { status: 'idle' },
+  cameraFolders = [],
+  folderId = '',
+  onFolderChange,
   onTestMotion,
   onSave,
   onClose,
@@ -551,6 +554,24 @@ export function StreamConfigModal({
                     <p className="mt-1 text-xs text-muted-foreground">{t('streamsConfig.streamNameImmutable')}</p>
                   )}
                 </div>
+
+                {!isEditing && cameraFolders.length > 0 && onFolderChange && (
+                  <div className="md:col-span-2">
+                    <label htmlFor="stream-folder" className="block text-sm font-medium mb-2">Folder</label>
+                    <select
+                      id="stream-folder"
+                      className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                      value={cameraFolders.some(folder => folder.id === folderId) ? folderId : ''}
+                      onChange={(event) => onFolderChange(event.target.value)}
+                    >
+                      <option value="">No folder</option>
+                      {cameraFolders.map(folder => (
+                        <option key={folder.id} value={folder.id}>{folder.name}</option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-xs text-muted-foreground">The camera is shown under this folder in the sidebar Camera List.</p>
+                  </div>
+                )}
 
                 <div className="md:col-span-2">
                   <label htmlFor="stream-url" className="block text-sm font-medium mb-2">

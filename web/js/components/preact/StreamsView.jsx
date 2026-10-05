@@ -451,6 +451,41 @@ export function StreamsView() {
     retryDelay: 1000
   });
 
+  // Sidebar camera folders (same cache key as the sidebar, so both stay in sync)
+  const { data: cameraFoldersData } = useQuery(['camera-folders'], '/api/camera-folders', {
+    timeout: 10000,
+    retries: 1,
+    retryDelay: 1000
+  });
+  const cameraFolders = Array.isArray(cameraFoldersData?.folders) ? cameraFoldersData.folders : [];
+
+  // Put a newly created camera into the folder chosen in the Add Camera form
+  const addCameraToFolder = async (cameraName, folderId) => {
+    const folders = queryClient.getQueryData(['camera-folders'])?.folders || cameraFolders;
+    if (!cameraName || !folders.some(folder => folder.id === folderId)) {
+      return;
+    }
+    const nextFolders = folders.map(folder => ({
+      ...folder,
+      cameras: folder.id === folderId
+        ? [...(folder.cameras || []).filter(name => name !== cameraName), cameraName]
+        : (folder.cameras || []).filter(name => name !== cameraName),
+    }));
+    try {
+      const saved = await fetchJSON('/api/camera-folders', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folders: nextFolders }),
+        timeout: 10000,
+        retries: 1,
+        retryDelay: 1000
+      });
+      queryClient.setQueryData(['camera-folders'], saved);
+    } catch (error) {
+      showStatusMessage(`Camera added, but it could not be put in the folder: ${error.message}`, 'warning', 8000);
+    }
+  };
+
   // Process the response to handle both array and object formats
   const streams = Array.isArray(streamsResponse) ? streamsResponse : (streamsResponse.streams || []);
 
@@ -582,6 +617,8 @@ export function StreamsView() {
   const [isEditing, setIsEditing] = useState(false);
   // Result of the Test button next to the stream URL field
   const [urlProbe, setUrlProbe] = useState({ status: 'idle' });
+  // Folder a newly added camera goes into ('' = none)
+  const [newCameraFolderId, setNewCameraFolderId] = useState('');
   const probeAbortRef = useRef(null);
   const [isCloning, setIsCloning] = useState(false);
 
@@ -646,6 +683,9 @@ export function StreamsView() {
         showStatusMessage(t('streams.streamAddedSuccessfully'));
         if (data?.warning_message) {
           showStatusMessage(data.warning_message, 'warning', 9000);
+        }
+        if (newCameraFolderId) {
+          addCameraToFolder(variables?.name, newCameraFolderId);
         }
       }
       closeModal();
@@ -1153,6 +1193,7 @@ export function StreamsView() {
       tags: ''
     });
     resetUrlProbe();
+    setNewCameraFolderId('');
     setIsEditing(false);
     setIsCloning(false);
     setModalVisible(true);
@@ -1226,6 +1267,7 @@ export function StreamsView() {
   // Close modal
   const closeModal = () => {
     resetUrlProbe();
+    setNewCameraFolderId('');
     setModalVisible(false);
     setIsEditing(false);
     setIsCloning(false);
@@ -1500,14 +1542,26 @@ export function StreamsView() {
     const params = new URLSearchParams(window.location.search);
     const editName = params.get('edit');
     const deleteName = params.get('delete');
-    if (!editName && !deleteName) {
+    const addToFolder = params.get('add') === '1' ? (params.get('folder') || '') : null;
+    if (!editName && !deleteName && addToFolder === null) {
       return;
     }
 
     params.delete('edit');
     params.delete('delete');
+    params.delete('add');
+    params.delete('folder');
     const nextSearch = params.toString();
     window.history.replaceState({}, '', `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash || ''}`);
+
+    if (addToFolder !== null) {
+      // openAddStreamModal checks permission and resets the folder, so set it after
+      openAddStreamModal();
+      if (canCreateStreams) {
+        setNewCameraFolderId(addToFolder);
+      }
+      return;
+    }
 
     if (!canModifyStreams) {
       showStatusMessage('You do not have permission to edit or delete cameras.', 'error', 5000);
@@ -1526,7 +1580,7 @@ export function StreamsView() {
     } else {
       openDeleteModal(stream);
     }
-  }, [roleLoading, isLoading, canModifyStreams, streamsResponse, sidebarActionTick]);
+  }, [roleLoading, isLoading, canModifyStreams, canCreateStreams, streamsResponse, sidebarActionTick]);
 
   const validateRtspDeviceMutation = usePostMutation(
     '/api/discovery/rtsp/validate',
@@ -2888,6 +2942,9 @@ export function StreamsView() {
           onThresholdChange={handleThresholdChange}
           onTestUrl={testStreamUrl}
           urlProbe={visibleUrlProbe}
+          cameraFolders={cameraFolders}
+          folderId={newCameraFolderId}
+          onFolderChange={setNewCameraFolderId}
           onTestMotion={triggerTestMotionEvent}
           onSave={handleSubmit}
           onClose={closeModal}
