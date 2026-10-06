@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE  // timegm()
+#endif
 #include "video/onvif_device_management.h"
 #include "video/onvif_soap.h"
 #include "video/stream_manager.h"
@@ -184,19 +187,31 @@ static char* send_soap_request(const char *device_url, const char *soap_action, 
 }
 
 // Find a child element by name
+// Element name without its namespace prefix ("env:Body" -> "Body")
+static const char *local_name(const char *name) {
+    const char *colon = name ? strchr(name, ':') : NULL;
+    return colon ? colon + 1 : name;
+}
+
+// Find a child by local name, whatever prefix the camera uses: cameras write
+// env:Body, SOAP-ENV:Body, s:Body, tr2:Profiles... for the same elements
 static ezxml_t find_child(ezxml_t parent, const char *name) {
-    if (!parent) return NULL;
-    return ezxml_child(parent, name);
+    if (!parent || !name) return NULL;
+    const char *wanted = local_name(name);
+    for (ezxml_t child = parent->child; child; child = child->sibling) {
+        if (strcmp(local_name(child->name), wanted) == 0) {
+            return child;
+        }
+    }
+    return NULL;
 }
 
 // Find a child element by name with namespace prefix
 static ezxml_t find_child_with_ns(ezxml_t parent, const char *ns, const char *name) {
     if (!parent) return NULL;
     
-    char full_name[256];
-    snprintf(full_name, sizeof(full_name), "%s:%s", ns, name);
-    
-    return ezxml_child(parent, full_name);
+    (void)ns;  // match on the local name; prefixes differ between cameras
+    return find_child(parent, name);
 }
 
 // Find all elements with a specific name
@@ -204,7 +219,7 @@ static void find_elements_by_name(ezxml_t root, const char *name, ezxml_t *resul
     if (!root || !name || !results || !count || max_count <= 0) return;
     
     // Check if the current element matches
-    if (strcmp(root->name, name) == 0) {
+    if (strcmp(local_name(root->name), local_name(name)) == 0) {
         if (*count < max_count) {
             results[*count] = root;
             (*count)++;
@@ -315,11 +330,11 @@ static char* get_media_service_url(const char *device_url, const char *username,
             const char *media_path = strstr(device_path, "/device_service");
             if (media_path) {
                 size_t prefix_len = media_path - device_url;
-                media_url = malloc(prefix_len + strlen("/onvif/media_service") + 1);
+                // prefix already ends in ".../onvif", so only the last segment changes
+                size_t media_url_size = prefix_len + strlen("/media_service") + 1;
+                media_url = malloc(media_url_size);
                 if (media_url) {
-                    strncpy(media_url, device_url, prefix_len);
-                    media_url[prefix_len] = '\0';
-                    strncat(media_url, "/onvif/media_service", strlen("/onvif/media_service"));
+                    snprintf(media_url, media_url_size, "%.*s/media_service", (int)prefix_len, device_url);
                     char safe_media_url[MAX_URL_LENGTH];
                     if (url_redact_for_logging(media_url, safe_media_url, sizeof(safe_media_url)) != 0) {
                         strncpy(safe_media_url, "[invalid-url]", sizeof(safe_media_url) - 1);
@@ -347,10 +362,58 @@ static char* get_media_service_url(const char *device_url, const char *username,
     return media_url;
 }
 
+// Read a number from <...:Name>N</...:Name> under `parent`, or -1
+static int xml_child_int(ezxml_t parent, const char *name) {
+    ezxml_t node = find_child(parent, name);
+    return node ? atoi(ezxml_txt(node)) : -1;
+}
+
+// Ask the camera for its UTC time (GetSystemDateAndTime needs no login) and
+// make following WS-Security timestamps on this thread use the camera's
+// clock. Many cameras reject a login whose timestamp is a few minutes off.
+static void sync_camera_clock(const char *device_url) {
+    onvif_set_camera_clock_offset(0);
+    const char *request_body = "<GetSystemDateAndTime xmlns=\"http://www.onvif.org/ver10/device/wsdl\"/>";
+    char *response = send_soap_request(device_url, NULL, request_body, NULL, NULL);
+    if (!response) {
+        return;
+    }
+    time_t now = time(NULL);
+    ezxml_t xml = ezxml_parse_str(response, strlen(response));
+    ezxml_t found[1];
+    int count = 0;
+    if (xml) {
+        find_elements_by_name(xml, "UTCDateTime", found, &count, 1);
+    }
+    if (count == 1) {
+        ezxml_t date = find_child(found[0], "Date");
+        ezxml_t clock = find_child(found[0], "Time");
+        struct tm camera_tm = {0};
+        camera_tm.tm_year = xml_child_int(date, "Year") - 1900;
+        camera_tm.tm_mon = xml_child_int(date, "Month") - 1;
+        camera_tm.tm_mday = xml_child_int(date, "Day");
+        camera_tm.tm_hour = xml_child_int(clock, "Hour");
+        camera_tm.tm_min = xml_child_int(clock, "Minute");
+        camera_tm.tm_sec = xml_child_int(clock, "Second");
+        if (camera_tm.tm_year > 70 && camera_tm.tm_mon >= 0 && camera_tm.tm_mday > 0 &&
+            camera_tm.tm_hour >= 0 && camera_tm.tm_min >= 0 && camera_tm.tm_sec >= 0) {
+            long offset = (long)(timegm(&camera_tm) - now);
+            // Small differences do not matter; only correct real clock drift
+            if (offset > 5 || offset < -5) {
+                onvif_set_camera_clock_offset(offset);
+                log_info("Camera clock differs from server by %+ld s; using camera time for ONVIF login", offset);
+            }
+        }
+    }
+    if (xml) ezxml_free(xml);
+    free(response);
+}
+
 // Get ONVIF device profiles
 int get_onvif_device_profiles(const char *device_url, const char *username, 
                              const char *password, onvif_profile_t *profiles, 
                              int max_profiles) {
+    sync_camera_clock(device_url);
     char *media_url = get_media_service_url(device_url, username, password);
     if (!media_url) {
         log_error("Couldn't get media service URL");
@@ -703,6 +766,7 @@ int add_onvif_device_as_stream(const onvif_device_info_t *device_info,
 
 // Test connection to an ONVIF device
 int test_onvif_connection(const char *url, const char *username, const char *password) {
+    sync_camera_clock(url);
     // Attempt to get device profiles as a way to test the connection
     char safe_device_url[MAX_URL_LENGTH];
     if (url_redact_for_logging(url, safe_device_url, sizeof(safe_device_url)) != 0) {

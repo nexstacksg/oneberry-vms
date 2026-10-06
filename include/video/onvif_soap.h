@@ -43,6 +43,13 @@ void onvif_log_soap_fault(char *response, size_t response_len, const char *conte
  * rejected a request (e.g. ter:NotAuthorized) instead of returning empty data.
  */
 const char *onvif_get_last_fault(void);
+
+/**
+ * Seconds the camera's clock is ahead of the server's, for this thread's
+ * following requests (0 = use server time). Used for the WS-Security
+ * Created timestamp, which cameras check against their own clock.
+ */
+void onvif_set_camera_clock_offset(long seconds);
 void onvif_clear_last_fault(void);
 
 #endif /* ONVIF_SOAP_H */

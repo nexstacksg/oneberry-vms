@@ -21,6 +21,15 @@
 #include <mbedtls/sha1.h>
 #include <mbedtls/base64.h>
 
+// Seconds the camera's clock is ahead of ours (per request thread). Cameras
+// reject UsernameToken timestamps too far from their own clock, so the
+// Created time is expressed in the camera's time.
+static __thread long t_camera_clock_offset;
+
+void onvif_set_camera_clock_offset(long seconds) {
+    t_camera_clock_offset = seconds;
+}
+
 char *onvif_create_security_header(const char *username, const char *password) {
     if (!username || !password || username[0] == '\0' || password[0] == '\0') {
         log_error("onvif_create_security_header: username and password must be non-empty");
@@ -65,6 +74,7 @@ char *onvif_create_security_header(const char *username, const char *password) {
     struct tm tm_now_buf;
     const struct tm *tm_now;
     time(&now);
+    now += t_camera_clock_offset;
     tm_now = gmtime_r(&now, &tm_now_buf);
     strftime(created, sizeof(created), "%Y-%m-%dT%H:%M:%S.000Z", tm_now);
 
