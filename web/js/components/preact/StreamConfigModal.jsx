@@ -555,15 +555,20 @@ export function StreamConfigModal({
                     type="text"
                     id="stream-name"
                     name="name"
-                    className={`w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground ${isEditing ? 'bg-muted/30' : ''}`}
+                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
                     value={currentStream.name}
                     onChange={onInputChange}
-                    disabled={isEditing}
+                    maxLength={63}
                     required
                     placeholder={t('streamsConfig.streamNamePlaceholder')}
                   />
-                  {isEditing && (
-                    <p className="mt-1 text-xs text-muted-foreground">{t('streamsConfig.streamNameImmutable')}</p>
+                  {isEditing && currentStream.originalName && currentStream.name.trim() !== currentStream.originalName && (
+                    <p className="mt-1 text-xs text-amber-600 dark:text-amber-400" data-testid="stream-rename-hint">
+                      Renaming from "{currentStream.originalName}". Its recordings, layouts and folders move to the new name; the camera reconnects briefly when you save.
+                    </p>
+                  )}
+                  {isEditing && (!currentStream.originalName || currentStream.name.trim() === currentStream.originalName) && (
+                    <p className="mt-1 text-xs text-muted-foreground">You can rename this camera. Its recordings, layouts and folders keep working.</p>
                   )}
                 </div>
 

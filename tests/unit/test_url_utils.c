@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <string.h>
+
 #include "unity.h"
 #include "core/url_utils.h"
 
@@ -34,6 +36,18 @@ void test_url_strip_credentials_preserves_suffix(void) {
     char url[256];
     TEST_ASSERT_EQUAL_INT(0, url_strip_credentials("rtsp://alice:secret@camera/live#transport=tcp#timeout=30", url, sizeof(url)));
     TEST_ASSERT_EQUAL_STRING("rtsp://camera/live#transport=tcp#timeout=30", url);
+}
+
+void test_url_credentials_round_trip_keeps_single_encoding(void) {
+    // Re-applying extracted credentials must not double-encode them
+    // ("%21" must not become "%2521")
+    const char *url = "rtsp://root:secret%21@10.0.0.5:554/axis-media/media.amp";
+    char username[64], password[64], out[256];
+    TEST_ASSERT_EQUAL_INT(0, url_extract_credentials(url, username, sizeof(username), password, sizeof(password)));
+    TEST_ASSERT_EQUAL_STRING("secret!", password);
+    TEST_ASSERT_EQUAL_INT(0, url_apply_credentials(url, username, password, out, sizeof(out)));
+    TEST_ASSERT_NULL(strstr(out, "%25"));
+    TEST_ASSERT_EQUAL_STRING(url, out);
 }
 
 void test_url_extract_credentials_decodes_values(void) {
@@ -115,6 +129,7 @@ int main(void) {
     RUN_TEST(test_url_apply_credentials_preserves_fragment_suffix);
     RUN_TEST(test_url_strip_credentials_preserves_suffix);
     RUN_TEST(test_url_extract_credentials_decodes_values);
+    RUN_TEST(test_url_credentials_round_trip_keeps_single_encoding);
     RUN_TEST(test_url_build_onvif_device_service_url_overrides_port_and_strips_credentials);
     RUN_TEST(test_url_build_onvif_device_service_url_preserves_https_scheme);
     RUN_TEST(test_url_build_onvif_service_url_rtsp_to_http_with_device_service);

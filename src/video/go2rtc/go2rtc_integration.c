@@ -1888,31 +1888,19 @@ bool go2rtc_integration_register_stream(const char *stream_name) {
         strncpy(password, config.onvif_password, sizeof(password) - 1);
     }
 
-    // If credentials not in onvif fields, try to extract from URL
-    // Format: rtsp://username:password@host:port/path
+    // If credentials not in onvif fields, take them from the URL. They are
+    // percent-encoded there and go2rtc_stream_register() encodes them again,
+    // so they must be decoded here: a hand-written split passed "%21" through
+    // and the camera got "%2521" (wrong password) until the next restart.
     if (username[0] == '\0') {
-        const char *url = config.url;
-        if (strncmp(url, "rtsp://", 7) == 0) {
-            const char *at_sign = strchr(url + 7, '@');
-            if (at_sign) {
-                const char *colon = strchr(url + 7, ':');
-                if (colon && colon < at_sign) {
-                    // Extract username
-                    size_t username_len = colon - (url + 7);
-                    if (username_len < sizeof(username)) {
-                        strncpy(username, url + 7, username_len);
-                        username[username_len] = '\0';
-
-                        // Extract password if not already set
-                        if (password[0] == '\0') {
-                            size_t password_len = at_sign - (colon + 1);
-                            if (password_len < sizeof(password)) {
-                                strncpy(password, colon + 1, password_len);
-                                password[password_len] = '\0';
-                            }
-                        }
-                    }
-                }
+        char url_username[sizeof(username)] = {0};
+        char url_password[sizeof(password)] = {0};
+        if (url_extract_credentials(config.url, url_username, sizeof(url_username),
+                                    url_password, sizeof(url_password)) == 0 &&
+            url_username[0] != '\0') {
+            memcpy(username, url_username, sizeof(username));
+            if (password[0] == '\0') {
+                memcpy(password, url_password, sizeof(password));
             }
         }
     }

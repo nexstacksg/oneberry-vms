@@ -89,6 +89,21 @@ static int manual_strip_credentials(const char *url, char *out_url, size_t out_s
     return (written < 0 || (size_t)written >= out_size) ? -1 : 0;
 }
 
+// Decode %XX escapes in place (userinfo in URLs is percent-encoded)
+static void percent_decode_in_place(char *text) {
+    char *out = text;
+    for (const char *in = text; *in; in++) {
+        if (in[0] == '%' && isxdigit((unsigned char)in[1]) && isxdigit((unsigned char)in[2])) {
+            char hex[3] = { in[1], in[2], '\0' };
+            *out++ = (char)strtol(hex, NULL, 16);
+            in += 2;
+        } else {
+            *out++ = *in;
+        }
+    }
+    *out = '\0';
+}
+
 static int manual_extract_credentials(const char *url, char *username,
                                       size_t username_size, char *password,
                                       size_t password_size) {
@@ -126,6 +141,11 @@ static int manual_extract_credentials(const char *url, char *username,
         password[password_len] = '\0';
     }
 
+    // Match the libcurl path (CURLU_URLDECODE): callers re-apply these
+    // credentials, which encodes them again, so returning "%21" here turned
+    // a password ending in "!" into "%2521" in the go2rtc source URL
+    percent_decode_in_place(username);
+    percent_decode_in_place(password);
     return 0;
 }
 

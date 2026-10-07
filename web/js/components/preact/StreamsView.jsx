@@ -42,6 +42,8 @@ function buildStreamFormState(stream, motion, {
   return {
     ...stream,
     name,
+    // The saved name, so an edit can tell whether the camera is being renamed
+    originalName: stream.name || '',
     width: resetVideo ? 0 : (stream.width || 0),
     height: resetVideo ? 0 : (stream.height || 0),
     fps: resetVideo ? 0 : (stream.fps || 0),
@@ -618,9 +620,20 @@ export function StreamsView() {
     mutationFn: async (streamData) => {
       const forcedMode = streamData?.__mode;
       const shouldUpdate = forcedMode === 'update' || (forcedMode !== 'create' && isEditing);
-      const { __mode, ...payload } = streamData || {};
+      const { __mode, originalName, ...payload } = streamData || {};
 
       if (shouldUpdate) {
+        // A changed name is a rename: do it first, everywhere, then save the
+        // remaining settings under the new name
+        if (originalName && originalName !== payload.name) {
+          await fetchJSON(`/api/streams/${encodeURIComponent(originalName)}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: payload.name }),
+            timeout: 30000,
+            retries: 0
+          });
+        }
         // Update existing stream via PUT
         const url = `/api/streams/${encodeURIComponent(payload.name)}`;
         // `name` is used as the stream identifier in the URL path and must not be included in the request body
@@ -670,8 +683,12 @@ export function StreamsView() {
         }
       }
       closeModal();
-      // Invalidate and refetch streams data
+      // Invalidate and refetch streams data (and what refers to cameras by name)
       queryClient.invalidateQueries({ queryKey: ['streams'] });
+      if (didUpdate && variables?.originalName && variables.originalName !== variables.name) {
+        queryClient.invalidateQueries({ queryKey: ['camera-folders'] });
+        queryClient.invalidateQueries({ queryKey: ['live-layouts'] });
+      }
     },
     onError: (error, variables) => {
       const forcedMode = variables?.__mode;
@@ -880,6 +897,7 @@ export function StreamsView() {
     // Prepare stream data for API
     const streamData = {
       name: currentStream.name.trim(),
+      originalName: isEditing ? currentStream.originalName : undefined,
       url: currentStream.url,
       secondary_url: currentStream.secondaryUrl || '',
       admin_url: currentStream.adminUrl || '',

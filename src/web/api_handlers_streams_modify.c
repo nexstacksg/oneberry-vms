@@ -29,6 +29,9 @@
 #include "video/go2rtc/go2rtc_api.h"
 #include "video/mp4_recording.h"
 #include "storage/storage_manager.h"
+#include "database/db_auth.h"
+#include "database/db_streams.h"
+#include "database/db_system_settings.h"
 
 
 /**
@@ -2161,4 +2164,186 @@ void handle_post_stream_refresh(const http_request_t *req, http_response_t *res)
     }
 
     pthread_attr_destroy(&attr);
+}
+
+/* ---------------------------------------------------------------------------
+ * Rename a camera: POST /api/streams/:id/rename  {"name": "<new name>"}
+ * ------------------------------------------------------------------------ */
+
+#define RENAME_SETTINGS_MAX_BYTES 131072
+
+/* Replace camera-name references in a layouts/folders JSON document: any
+ * "camera": "<old>" value and any "<old>" entry in a "cameras" array. */
+static bool rename_camera_refs_json(cJSON *node, const char *old_name, const char *new_name) {
+    bool changed = false;
+    for (cJSON *child = node ? node->child : NULL; child; child = child->next) {
+        if (cJSON_IsString(child) && child->string && strcmp(child->string, "camera") == 0 &&
+            strcmp(child->valuestring, old_name) == 0) {
+            cJSON_SetValuestring(child, new_name);
+            changed = true;
+        } else if (cJSON_IsArray(child) && child->string && strcmp(child->string, "cameras") == 0) {
+            for (cJSON *item = child->child; item; item = item->next) {
+                if (cJSON_IsString(item) && strcmp(item->valuestring, old_name) == 0) {
+                    cJSON_SetValuestring(item, new_name);
+                    changed = true;
+                }
+            }
+        } else if (cJSON_IsObject(child) || cJSON_IsArray(child)) {
+            changed |= rename_camera_refs_json(child, old_name, new_name);
+        }
+    }
+    return changed;
+}
+
+static void rename_camera_in_setting(const char *key, const char *old_name, const char *new_name) {
+    char *stored = calloc(1, RENAME_SETTINGS_MAX_BYTES);
+    if (!stored) return;
+    if (db_get_system_setting(key, stored, RENAME_SETTINGS_MAX_BYTES) == 0 && stored[0]) {
+        cJSON *doc = cJSON_Parse(stored);
+        if (doc && rename_camera_refs_json(doc, old_name, new_name)) {
+            char *json = cJSON_PrintUnformatted(doc);
+            if (!json || db_set_system_setting(key, json) != 0) {
+                log_warn("Rename: could not update camera references in %s", key);
+            }
+            free(json);
+        }
+        cJSON_Delete(doc);
+    }
+    free(stored);
+}
+
+void handle_post_stream_rename(const http_request_t *req, http_response_t *res) {
+    user_t user;
+    if (!httpd_check_viewer_access(req, &user)) {
+        http_response_set_json_error(res, 401, "Unauthorized");
+        return;
+    }
+    if (user.role != USER_ROLE_ADMIN && user.role != USER_ROLE_USER) {
+        http_response_set_json_error(res, 403, "You do not have permission to rename cameras");
+        return;
+    }
+
+    char old_name[MAX_STREAM_NAME];
+    if (http_request_extract_path_param(req, "/api/streams/", old_name, sizeof(old_name)) != 0) {
+        http_response_set_json_error(res, 400, "Invalid camera name in URL");
+        return;
+    }
+    // The extracted parameter is "<name>/rename"
+    char *suffix = strstr(old_name, "/rename");
+    if (suffix) {
+        *suffix = '\0';
+    }
+
+    cJSON *body = httpd_parse_json_body(req);
+    const cJSON *name_json = body ? cJSON_GetObjectItem(body, "name") : NULL;
+    char new_name[MAX_STREAM_NAME] = {0};
+    if (cJSON_IsString(name_json)) {
+        const char *start = name_json->valuestring;
+        while (isspace((unsigned char)*start)) start++;
+        size_t len = strlen(start);
+        while (len > 0 && isspace((unsigned char)start[len - 1])) len--;
+        if (len > 0 && len < sizeof(new_name)) {
+            memcpy(new_name, start, len);
+        } else if (len >= sizeof(new_name)) {
+            cJSON_Delete(body);
+            http_response_set_json_error(res, 400, "The new name is too long");
+            return;
+        }
+    }
+    cJSON_Delete(body);
+
+    // Messages go through http_response_set_json_error, which does not escape
+    // quotes, so camera names are never put into them
+    if (new_name[0] == '\0') {
+        http_response_set_json_error(res, 400, "Enter a new camera name");
+        return;
+    }
+    if (strpbrk(new_name, "\"\\/") || strstr(new_name, "__low")) {
+        http_response_set_json_error(res, 400, "Camera names cannot contain quotes, slashes or __low");
+        return;
+    }
+    if (strcmp(new_name, old_name) == 0) {
+        http_response_set_json(res, 200, "{\"success\":true}");
+        return;
+    }
+
+    stream_config_t config;
+    if (get_stream_config_by_name(old_name, &config) != 0) {
+        http_response_set_json_error(res, 404, "Camera not found");
+        return;
+    }
+    stream_config_t existing;
+    if (get_stream_by_name(new_name) || get_stream_config_by_name(new_name, &existing) == 0) {
+        http_response_set_json_error(res, 409, "Another camera already uses this name");
+        return;
+    }
+
+    log_info("Renaming camera '%s' to '%s'", old_name, new_name);
+
+    // 1. Take the camera down under its old name (same order as DELETE)
+    stream_handle_t stream = get_stream_by_name(old_name);
+    if (stream) {
+        stream_status_t status = get_stream_status(stream);
+        if (status == STREAM_STATUS_RUNNING || status == STREAM_STATUS_STARTING) {
+            stop_stream(stream);
+            for (int wait = 30; wait > 0 && get_stream_status(stream) != STREAM_STATUS_STOPPED; wait--) {
+                usleep(100000);
+            }
+        }
+        if (is_unified_detection_running(old_name)) {
+            stop_unified_detection_thread(old_name);
+        }
+        remove_stream(stream);
+    }
+    // stop_stream only stops the recorder for a running stream; the MP4
+    // writer thread can be running anyway, so stop it by name explicitly
+    stop_mp4_recording(old_name);
+    go2rtc_integration_unregister_stream(old_name);
+
+    // 2. Rename it everywhere in the database
+    int db_result = rename_stream_config(old_name, new_name);
+    const char *active_name = db_result == 0 ? new_name : old_name;
+    if (db_result == 0) {
+        rename_camera_in_setting("live_view_layouts", old_name, new_name);
+        rename_camera_in_setting("camera_folders", old_name, new_name);
+        for (int i = 0; i < g_config.max_streams; i++) {
+            if (strcmp(g_config.streams[i].name, old_name) == 0) {
+                g_config.streams[i].name[0] = '\0';
+            }
+        }
+    }
+
+    // 3. Bring the camera back up (under the new name, or the old one if the rename failed)
+    snprintf(config.name, sizeof(config.name), "%s", active_name);
+    stream_handle_t restarted = add_stream(&config);
+    if (restarted) {
+        if (db_result == 0) {
+            sync_new_stream_to_runtime_config(&config);
+        }
+        if (config.enabled) {
+            start_stream(restarted);
+            if (config.detection_based_recording && config.detection_model[0] != '\0') {
+                start_unified_detection_thread(config.name, config.detection_model, config.detection_threshold,
+                                               config.pre_detection_buffer, config.post_detection_buffer,
+                                               config.record);
+            }
+        }
+    } else {
+        log_error("Rename: failed to restart camera '%s'", active_name);
+    }
+
+    if (db_result != 0) {
+        http_response_set_json_error(res, 500, "The camera could not be renamed; it keeps its old name");
+        return;
+    }
+
+    cJSON *ok = cJSON_CreateObject();
+    cJSON_AddBoolToObject(ok, "success", true);
+    cJSON_AddStringToObject(ok, "name", new_name);
+    cJSON_AddStringToObject(ok, "previous_name", old_name);
+    char *json = cJSON_PrintUnformatted(ok);
+    cJSON_Delete(ok);
+    http_response_set_json(res, 200, json ? json : "{\"success\":true}");
+    free(json);
+    log_info("Renamed camera '%s' to '%s'", old_name, new_name);
 }

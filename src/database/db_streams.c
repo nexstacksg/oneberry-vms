@@ -1643,3 +1643,105 @@ uint64_t get_stream_storage_usage_db(const char *stream_name) {
 
     return size_bytes;
 }
+
+/* Tables that refer to a camera by its name in a stream_name column */
+static const char *const STREAM_NAME_TABLES[] = {
+    "recordings", "events", "detections", "detection_zones", "motion_settings",
+    "motion_recording_config", "motion_recordings", "storage_daily_stats", NULL
+};
+
+/* Per-camera settings/statistics tables whose leftover rows for new_name (from
+ * a camera deleted earlier with that name) would clash with the renamed rows */
+static const char *const STREAM_SETTINGS_TABLES[] = {
+    "motion_settings", "motion_recording_config", "detection_zones", "storage_daily_stats", NULL
+};
+
+static bool db_table_exists(sqlite3 *db, const char *table) {
+    sqlite3_stmt *stmt = NULL;
+    bool exists = false;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, table, -1, SQLITE_STATIC);
+        exists = sqlite3_step(stmt) == SQLITE_ROW;
+    }
+    sqlite3_finalize(stmt);
+    return exists;
+}
+
+/* Run "<sql>" with ?1 = new_name and ?2 = old_name; returns rows changed or -1 */
+static int db_exec_rename(sqlite3 *db, const char *sql, const char *new_name, const char *old_name) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        log_error("Rename: failed to prepare '%s': %s", sql, sqlite3_errmsg(db));
+        return -1;
+    }
+    sqlite3_bind_text(stmt, 1, new_name, -1, SQLITE_STATIC);
+    if (sqlite3_bind_parameter_count(stmt) >= 2) {
+        sqlite3_bind_text(stmt, 2, old_name, -1, SQLITE_STATIC);
+    }
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        log_error("Rename: '%s' failed: %s", sql, sqlite3_errmsg(db));
+        return -1;
+    }
+    return sqlite3_changes(db);
+}
+
+int rename_stream_config(const char *old_name, const char *new_name) {
+    sqlite3 *db = get_db_handle();
+    pthread_mutex_t *db_mutex = get_db_mutex();
+    if (!db || !old_name || !new_name || !old_name[0] || !new_name[0]) {
+        return -1;
+    }
+
+    pthread_mutex_lock(db_mutex);
+    char *err = NULL;
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE TRANSACTION;", NULL, NULL, &err) != SQLITE_OK) {
+        log_error("Rename: failed to begin transaction: %s", err ? err : "unknown");
+        sqlite3_free(err);
+        pthread_mutex_unlock(db_mutex);
+        return -1;
+    }
+
+    int result = 0;
+    char sql[256];
+
+    int changed = db_exec_rename(db, "UPDATE streams SET name = ?1 WHERE name = ?2", new_name, old_name);
+    if (changed < 0) {
+        result = -1;
+    } else if (changed == 0) {
+        result = -2;
+    }
+
+    if (result == 0 && db_exec_rename(db, "UPDATE streams SET motion_trigger_source = ?1 WHERE motion_trigger_source = ?2",
+                                      new_name, old_name) < 0) {
+        result = -1;
+    }
+
+    for (int i = 0; result == 0 && STREAM_SETTINGS_TABLES[i]; i++) {
+        if (!db_table_exists(db, STREAM_SETTINGS_TABLES[i])) continue;
+        snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE stream_name = ?1", STREAM_SETTINGS_TABLES[i]);
+        if (db_exec_rename(db, sql, new_name, old_name) < 0) result = -1;
+    }
+
+    for (int i = 0; result == 0 && STREAM_NAME_TABLES[i]; i++) {
+        if (!db_table_exists(db, STREAM_NAME_TABLES[i])) continue;
+        snprintf(sql, sizeof(sql), "UPDATE %s SET stream_name = ?1 WHERE stream_name = ?2", STREAM_NAME_TABLES[i]);
+        if (db_exec_rename(db, sql, new_name, old_name) < 0) result = -1;
+    }
+
+    if (sqlite3_exec(db, result == 0 ? "COMMIT;" : "ROLLBACK;", NULL, NULL, &err) != SQLITE_OK) {
+        log_error("Rename: failed to %s: %s", result == 0 ? "commit" : "roll back", err ? err : "unknown");
+        sqlite3_free(err);
+        if (result == 0) {
+            sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+            result = -1;
+        }
+    }
+    pthread_mutex_unlock(db_mutex);
+
+    if (result == 0) {
+        log_info("Renamed stream '%s' to '%s' in the database", old_name, new_name);
+    }
+    return result;
+}

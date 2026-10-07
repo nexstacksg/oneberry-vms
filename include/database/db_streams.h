@@ -38,6 +38,15 @@ int update_stream_config(const char *name, const stream_config_t *stream);
  * @param name Stream name to delete
  * @return 0 on success, non-zero on failure
  */
+/**
+ * Rename a camera everywhere in the database in one transaction: the
+ * streams row, every table that refers to it by stream_name, and other
+ * cameras whose motion trigger is this camera. Nothing changes on error.
+ *
+ * @return 0 on success, -1 on error, -2 if old_name does not exist
+ */
+int rename_stream_config(const char *old_name, const char *new_name);
+
 int delete_stream_config(const char *name);
 
 /**
