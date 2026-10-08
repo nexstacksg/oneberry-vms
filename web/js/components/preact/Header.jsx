@@ -387,6 +387,9 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
   const [renamingLayoutId, setRenamingLayoutId] = useState('');
   const [renameLayoutName, setRenameLayoutName] = useState('');
   const [dragOverLayoutId, setDragOverLayoutId] = useState('');
+  // Camera drag onto folders: target folder id ('__unfiled__' = out of folders)
+  const [dragOverFolderId, setDragOverFolderId] = useState('');
+  const [draggingCameraNames, setDraggingCameraNames] = useState([]);
   const [selectedCameraNames, setSelectedCameraNames] = useState(() => new Set());
   const [cameraContextMenu, setCameraContextMenu] = useState(null);
   const [liveLayoutEditState, setLiveLayoutEditState] = useState({ layoutId: '', editing: false });
@@ -1293,16 +1296,20 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
     const cameraNames = selectedCameraNames.has(cameraName) && selectedCameraNameList.length > 0
       ? selectedCameraNameList
       : [cameraName];
-    event.dataTransfer.effectAllowed = 'copy';
+    // copy onto layouts, move into folders
+    event.dataTransfer.effectAllowed = 'copyMove';
     event.dataTransfer.setData('text/plain', cameraNames[0]);
     event.dataTransfer.setData('application/x-oneberry-camera', cameraNames[0]);
     event.dataTransfer.setData('application/x-oneberry-cameras', JSON.stringify(cameraNames));
     setSelectedCameraNames(new Set());
     cameraSelectionBeforeClickRef.current = new Set();
     setCameraContextMenu(null);
+    setDraggingCameraNames(cameraNames);
   }, [selectedCameraNameList, selectedCameraNames]);
 
   const handleCameraDragEnd = useCallback(() => {
+    setDraggingCameraNames([]);
+    setDragOverFolderId('');
     window.setTimeout(() => {
       suppressNextCameraClickRef.current = false;
     }, 50);
@@ -1564,6 +1571,70 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
     }
   }, [cameraFolders, folderPicker, saveCameraFolders, sidebarCameraList]);
 
+  // Move cameras into a folder (folderId) or out of all folders (null). A
+  // camera is only ever in one folder, so it leaves any other folder first.
+  const moveCamerasToFolder = useCallback(async (folderId, cameraNames) => {
+    const names = Array.from(new Set(cameraNames)).filter((name) => streamByName.has(name));
+    if (names.length === 0) return;
+    const moving = new Set(names);
+    const target = folderId ? cameraFolders.find((folder) => folder.id === folderId) : null;
+    if (folderId && !target) return;
+    const alreadyThere = target && names.every((name) => (target.cameras || []).includes(name));
+    const inAnyFolder = names.some((name) => cameraFolders.some((folder) => (folder.cameras || []).includes(name)));
+    if (alreadyThere || (!folderId && !inAnyFolder)) return;
+
+    const nextFolders = cameraFolders.map((folder) => {
+      const kept = (folder.cameras || []).filter((name) => !moving.has(name));
+      return folder.id === folderId ? { ...folder, cameras: [...kept, ...names] } : { ...folder, cameras: kept };
+    });
+    if (await saveCameraFolders(nextFolders)) {
+      if (folderId) {
+        setCollapsedFolderIds((previous) => {
+          const next = new Set(previous);
+          next.delete(folderId);
+          return next;
+        });
+      }
+      const label = names.length === 1 ? names[0] : `${names.length} cameras`;
+      showStatusMessage(folderId ? `Moved ${label} to ${target.name}` : `Removed ${label} from its folder`, 'success', 2500);
+    }
+  }, [cameraFolders, saveCameraFolders, streamByName]);
+
+  const readDraggedCameraNames = (event) => {
+    const types = Array.from(event.dataTransfer.types || []);
+    if (types.includes('application/x-oneberry-cameras')) {
+      try {
+        const names = getCameraNameList(JSON.parse(event.dataTransfer.getData('application/x-oneberry-cameras')));
+        if (names.length > 0) return names;
+      } catch {
+        // fall back to the single camera below
+      }
+    }
+    const single = event.dataTransfer.getData('application/x-oneberry-camera') || event.dataTransfer.getData('text/plain');
+    return single ? [single] : [];
+  };
+
+  // Drag-and-drop handlers for a folder row (or, with null, the "out of folders" zone)
+  const folderDropProps = (folderId) => (canManageSidebarCameras ? {
+    onDragOver: (event) => {
+      if (!Array.from(event.dataTransfer.types || []).includes('application/x-oneberry-camera')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      const key = folderId || '__unfiled__';
+      if (dragOverFolderId !== key) setDragOverFolderId(key);
+    },
+    onDragLeave: (event) => {
+      if (!event.currentTarget.contains(event.relatedTarget)) setDragOverFolderId('');
+    },
+    onDrop: (event) => {
+      if (!Array.from(event.dataTransfer.types || []).includes('application/x-oneberry-camera')) return;
+      event.preventDefault();
+      setDragOverFolderId('');
+      setDraggingCameraNames([]);
+      moveCamerasToFolder(folderId, readDraggedCameraNames(event));
+    },
+  } : {});
+
   const removeCameraFromFolder = useCallback((cameraName) => {
     setOpenMenu(null);
     saveCameraFolders(cameraFolders.map((folder) => ({
@@ -1653,7 +1724,12 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
     const isEmpty = folder.streams.length === 0;
     return (
       <Fragment key={`folder-${folder.id}`}>
-        <li className={`sidebar-camera-folder ${openMenu === menuKey ? 'is-menu-open' : ''}`} role="presentation">
+        <li
+          className={`sidebar-camera-folder ${openMenu === menuKey ? 'is-menu-open' : ''} ${dragOverFolderId === folder.id ? 'is-drop-target' : ''}`}
+          role="presentation"
+          data-folder-id={folder.id}
+          {...folderDropProps(folder.id)}
+        >
           <button
             type="button"
             className="sidebar-camera-folder-toggle"
@@ -1761,6 +1837,16 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
           onKeyDown={handleSourceCameraKeyDown}
         >
           {cameraFolderView.map(renderCameraFolder)}
+          {canManageSidebarCameras && draggingCameraNames.some((name) => camerasInFolders.has(name)) && (
+            <li
+              role="presentation"
+              data-testid="sidebar-unfile-zone"
+              className={`sidebar-camera-unfile-zone ${dragOverFolderId === '__unfiled__' ? 'is-drop-target' : ''}`}
+              {...folderDropProps(null)}
+            >
+              Drop here to remove from folder
+            </li>
+          )}
           {ungroupedSidebarCameras.map((stream) => renderSidebarCameraRow(stream, false))}
         </ul>
       </>
