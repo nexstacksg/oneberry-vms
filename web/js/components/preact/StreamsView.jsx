@@ -15,6 +15,7 @@ import { HealthView } from './HealthView.jsx';
 import { validateSession } from '../../utils/auth-utils.js';
 import { obfuscateUrlCredentials, urlHasCredentials } from '../../utils/url-utils.js';
 import { buildDiscoveredStreamPayload } from '../../utils/discovered-stream-utils.js';
+import { connectDiscoveredDevices } from '../../utils/discovery-connect-utils.js';
 import { detectedInfoToFormFields, formatDetectedSummary, isProbeableStreamUrl } from '../../utils/stream-probe-utils.js';
 import {
   VIDEO_FPS_PRESETS,
@@ -298,6 +299,10 @@ export function StreamsView() {
   const [customStreamName, setCustomStreamName] = useState('');
   const [onvifCredentials, setOnvifCredentials] = useState({ username: '', password: '' });
   const [showDiscoveryPassword, setShowDiscoveryPassword] = useState(false);
+  // Discovered cameras ticked for "Connect Selected" (shared username/password)
+  const [checkedDiscoveryIps, setCheckedDiscoveryIps] = useState([]);
+  const [batchConnectResults, setBatchConnectResults] = useState({});
+  const [isBatchConnecting, setIsBatchConnecting] = useState(false);
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
   const [onvifNetworkOverride, setOnvifNetworkOverride] = useState('auto');
@@ -1307,6 +1312,8 @@ export function StreamsView() {
       discoveryNetwork = 'auto';
     }
     setOnvifNetworkOverride(discoveryNetwork);
+    setCheckedDiscoveryIps([]);
+    setBatchConnectResults({});
     setOnvifModalVisible(true);
     try {
       const data = await fetchJSON('/api/discovery/cameras/status', {
@@ -1922,6 +1929,87 @@ export function StreamsView() {
     return streams.some(stream => streamMatchesDiscoveredDevice(stream, device));
   };
 
+  // Only new ONVIF cameras can be connected together; RTSP-only ones need a path
+  const isDeviceCheckable = (device) => !!device?.onvif && !isDeviceAlreadyAdded(device);
+  const checkableDiscoveredDevices = discoveredDevices.filter(isDeviceCheckable);
+  const checkedDiscoveredDevices = discoveredDevices.filter(device => checkedDiscoveryIps.includes(device.ip_address));
+  const allDiscoveredChecked = checkableDiscoveredDevices.length > 0 &&
+    checkableDiscoveredDevices.every(device => checkedDiscoveryIps.includes(device.ip_address));
+
+  const toggleDiscoveryChecked = (device) => {
+    if (!isDeviceCheckable(device)) return;
+    setCheckedDiscoveryIps(previous => (previous.includes(device.ip_address)
+      ? previous.filter(ip => ip !== device.ip_address)
+      : [...previous, device.ip_address]));
+  };
+
+  const toggleAllDiscoveryChecked = () => {
+    setCheckedDiscoveryIps(allDiscoveredChecked ? [] : checkableDiscoveredDevices.map(device => device.ip_address));
+  };
+
+  const fetchDiscoveryProfiles = async (device, credentials) => {
+    if (!isValidDeviceHost(device.ip_address)) {
+      throw new Error('Invalid device IP address');
+    }
+    const deviceUrl = device.device_service || `http://${device.ip_address}/onvif/device_service`;
+    const response = await fetch('/api/onvif/device/profiles', {
+      method: 'GET',
+      headers: {
+        'X-Device-URL': deviceUrl,
+        'X-Username': credentials.username,
+        'X-Password': credentials.password,
+        'X-Device-Manufacturer': device.manufacturer || '',
+        'X-Device-Model': device.model || ''
+      }
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(body?.error || `HTTP error ${response.status}`);
+    }
+    return body?.profiles || [];
+  };
+
+  const connectCheckedDiscoveredDevices = async () => {
+    if (!canCreateStreams) {
+      showStatusMessage(t('streams.createStreamForbidden'), 'error');
+      return;
+    }
+    const devices = checkedDiscoveredDevices.filter(isDeviceCheckable);
+    if (devices.length === 0) return;
+
+    setIsBatchConnecting(true);
+    setBatchConnectResults({});
+    const credentials = { username: onvifCredentials.username, password: onvifCredentials.password };
+    const results = await connectDiscoveredDevices(devices, {
+      credentials,
+      existingNames: streams.map(stream => stream.name),
+      fetchProfiles: fetchDiscoveryProfiles,
+      createStream: (payload) => fetchJSON('/api/streams', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        timeout: 45000,
+        retries: 0
+      }),
+      onUpdate: (ip, result) => setBatchConnectResults(previous => ({ ...previous, [ip]: result }))
+    });
+    setIsBatchConnecting(false);
+
+    const connectedIps = Object.keys(results).filter(ip => results[ip].state === 'connected');
+    const failedCount = Object.keys(results).length - connectedIps.length;
+    setCheckedDiscoveryIps(previous => previous.filter(ip => !connectedIps.includes(ip)));
+    if (connectedIps.length > 0) {
+      queryClient.invalidateQueries({ queryKey: ['streams'] });
+    }
+    showStatusMessage(
+      failedCount === 0
+        ? `${connectedIps.length} camera${connectedIps.length === 1 ? '' : 's'} connected`
+        : `${connectedIps.length} connected, ${failedCount} failed`,
+      failedCount === 0 ? 'success' : (connectedIps.length > 0 ? 'warning' : 'error'),
+      6000
+    );
+  };
+
   /**
    * Build the ONVIF device_service URL for a discovered device.
    * Returns a string URL on success, or null if the address is invalid
@@ -1999,6 +2087,62 @@ export function StreamsView() {
     if (status.includes('discover')) return 'bg-green-50 text-green-700 border-green-200';
     return 'bg-muted text-muted-foreground border-border';
   };
+
+  const renderDiscoveryCredentialFields = () => (
+    <div className="border-t border-border pt-4">
+      <h4 className="text-base font-semibold">{t('streams.authentication')}</h4>
+      <p className="mt-1 text-sm text-muted-foreground">{t('streams.onvifAuthenticationHelp')}</p>
+      <div className="mt-4 space-y-3">
+        <div className="form-group">
+          <label htmlFor="onvif-username" className="block text-sm font-medium mb-1">{t('auth.username')}</label>
+          <input
+            type="text"
+            id="onvif-username"
+            name="username"
+            className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+            placeholder="admin"
+            value={onvifCredentials.username}
+            onChange={handleCredentialChange}
+          />
+        </div>
+        <div className="form-group">
+          <label htmlFor="onvif-password" className="block text-sm font-medium mb-1">{t('auth.password')}</label>
+          <div className="relative">
+            <input
+              type={showDiscoveryPassword ? 'text' : 'password'}
+              id="onvif-password"
+              name="password"
+              className="w-full rounded-md border border-input bg-background px-3 py-2 pr-11 text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"
+              placeholder="password"
+              value={onvifCredentials.password}
+              onChange={handleCredentialChange}
+            />
+            <button
+              type="button"
+              className="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-md text-muted-foreground hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+              onClick={() => setShowDiscoveryPassword(prev => !prev)}
+              aria-label={showDiscoveryPassword ? 'Hide password' : 'Show password'}
+              title={showDiscoveryPassword ? 'Hide password' : 'Show password'}
+            >
+              {showDiscoveryPassword ? (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20C7 20 2.73 16.89 1 12c.74-2.1 2.05-3.89 3.72-5.19" />
+                  <path d="M9.9 4.24A10.68 10.68 0 0 1 12 4c5 0 9.27 3.11 11 8a11.45 11.45 0 0 1-2.16 3.19" />
+                  <path d="M14.12 14.12A3 3 0 0 1 9.88 9.88" />
+                  <path d="M1 1l22 22" />
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   const rankedDeviceProfiles = [...deviceProfiles].sort((a, b) => getDiscoveryProfileSortScore(b) - getDiscoveryProfileSortScore(a));
   const selectedDeviceAlreadyAdded = selectedDevice ? isDeviceAlreadyAdded(selectedDevice) : false;
@@ -3012,6 +3156,21 @@ export function StreamsView() {
                         : t('streams.discoveryDeviceListHelp')}
                     </p>
                   </div>
+                  {checkableDiscoveredDevices.length > 1 && (
+                    <label className="flex cursor-pointer select-none items-center gap-2 text-sm text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        data-testid="discovery-select-all"
+                        className="h-4 w-4 rounded border-input accent-primary"
+                        checked={allDiscoveredChecked}
+                        disabled={isBatchConnecting}
+                        onChange={toggleAllDiscoveryChecked}
+                      />
+                      <span>
+                        {checkedDiscoveryIps.length > 0 ? `${checkedDiscoveryIps.length} selected` : 'Select all'}
+                      </span>
+                    </label>
+                  )}
                 </div>
 
                 {discoveredDevices.length === 0 ? (
@@ -3032,6 +3191,9 @@ export function StreamsView() {
                     {discoveredDevices.map(device => {
                       const alreadyAdded = isDeviceAlreadyAdded(device);
                       const isSelected = selectedDevice && selectedDevice.ip_address === device.ip_address;
+                      const isChecked = checkedDiscoveryIps.includes(device.ip_address);
+                      const checkable = isDeviceCheckable(device);
+                      const batchResult = batchConnectResults[device.ip_address];
                       const ports = Array.isArray(device.rtsp_ports) ? device.rtsp_ports : [];
                       return (
                         <div
@@ -3039,7 +3201,7 @@ export function StreamsView() {
                           role="button"
                           tabIndex={0}
                           className={`w-full rounded-lg border p-4 text-left transition-colors ${
-                            isSelected
+                            isSelected || isChecked
                               ? 'border-primary bg-primary/5'
                               : 'border-border bg-background hover:bg-muted/40'
                           }`}
@@ -3054,6 +3216,22 @@ export function StreamsView() {
                           }}
                         >
                           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="flex min-w-0 items-start gap-3">
+                            <input
+                              type="checkbox"
+                              data-testid="discovery-device-checkbox"
+                              data-ip={device.ip_address}
+                              className="mt-1 h-4 w-4 flex-shrink-0 rounded border-input accent-primary disabled:cursor-not-allowed disabled:opacity-40"
+                              checked={isChecked}
+                              disabled={!checkable || isBatchConnecting}
+                              title={checkable
+                                ? 'Select to connect several cameras with the same username and password'
+                                : (device.onvif ? t('streams.alreadyAdded') : 'RTSP-only devices are added one at a time')}
+                              aria-label={`Select ${device.ip_address}`}
+                              onClick={(event) => event.stopPropagation()}
+                              onKeyDown={(event) => event.stopPropagation()}
+                              onChange={() => toggleDiscoveryChecked(device)}
+                            />
                             <div className="min-w-0">
                               <div className="flex flex-wrap items-center gap-2">
                                 <span className="font-mono text-base font-semibold text-foreground">{device.ip_address}</span>
@@ -3073,6 +3251,15 @@ export function StreamsView() {
                                   <span>{t('streams.rtspPorts')}: <span className="text-foreground">{ports.join(', ')}</span></span>
                                 )}
                               </div>
+                              {batchResult && batchResult.state !== 'connecting' && (
+                                <p
+                                  data-testid="discovery-batch-result"
+                                  className={`mt-2 text-xs ${batchResult.state === 'connected' ? 'text-emerald-600' : 'text-destructive'}`}
+                                >
+                                  {batchResult.state === 'connected' ? `Connected as ${batchResult.name}` : batchResult.message}
+                                </p>
+                              )}
+                            </div>
                             </div>
                             <div className="flex items-center gap-2 sm:flex-shrink-0">
                               <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${getDiscoveryStatusClass(device)}`}>
@@ -3100,6 +3287,57 @@ export function StreamsView() {
 
               <aside className="min-h-0 overflow-y-auto border-t border-border bg-muted/15 p-5 lg:border-l lg:border-t-0">
                 <div className="space-y-5">
+                  {checkedDiscoveredDevices.length > 0 ? (
+                    <div className="rounded-lg border border-border bg-background p-4" data-testid="discovery-batch-panel">
+                      <h4 className="text-sm font-semibold">
+                        {checkedDiscoveredDevices.length} camera{checkedDiscoveredDevices.length === 1 ? '' : 's'} selected
+                      </h4>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Use this when the selected cameras share the same username and password. Each camera is added
+                        with its main stream, plus its sub stream when it has one.
+                      </p>
+                      <ul className="mt-3 max-h-48 space-y-1 overflow-y-auto text-sm">
+                        {checkedDiscoveredDevices.map(device => {
+                          const result = batchConnectResults[device.ip_address];
+                          return (
+                            <li key={device.ip_address} className="flex items-center justify-between gap-3">
+                              <span className="font-mono text-foreground">{device.ip_address}</span>
+                              <span className={`text-xs ${
+                                result?.state === 'connected' ? 'text-emerald-600'
+                                  : result?.state === 'failed' ? 'text-destructive'
+                                    : 'text-muted-foreground'
+                              }`}>
+                                {result?.state === 'connecting' ? 'Connecting…'
+                                  : result?.state === 'connected' ? 'Connected'
+                                    : result?.state === 'failed' ? 'Failed'
+                                      : (device.manufacturer || 'ONVIF')}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                      <div className="mt-4">
+                        {renderDiscoveryCredentialFields()}
+                      </div>
+                      <button
+                        type="button"
+                        id="discovery-connect-selected-btn"
+                        className="btn-primary mt-4 w-full focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
+                        disabled={isBatchConnecting || !onvifCredentials.username}
+                        onClick={connectCheckedDiscoveredDevices}
+                      >
+                        {isBatchConnecting ? 'Connecting…' : `Connect Selected (${checkedDiscoveredDevices.length})`}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary mt-2 w-full focus:outline-none"
+                        disabled={isBatchConnecting}
+                        onClick={() => setCheckedDiscoveryIps([])}
+                      >
+                        Clear selection
+                      </button>
+                    </div>
+                  ) : (
                   <div className="rounded-lg border border-border bg-background p-4">
                     <h4 className="text-sm font-semibold">{t('streams.selectedDevice')}</h4>
                     {selectedDevice ? (
@@ -3121,59 +3359,7 @@ export function StreamsView() {
                             {t('streams.deviceAlreadyInUseTitle')}
                           </p>
                         )}
-                        <div className="border-t border-border pt-4">
-                          <h4 className="text-base font-semibold">{t('streams.authentication')}</h4>
-                          <p className="mt-1 text-sm text-muted-foreground">{t('streams.onvifAuthenticationHelp')}</p>
-                          <div className="mt-4 space-y-3">
-                            <div className="form-group">
-                              <label htmlFor="onvif-username" className="block text-sm font-medium mb-1">{t('auth.username')}</label>
-                              <input
-                                type="text"
-                                id="onvif-username"
-                                name="username"
-                                className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
-                                placeholder="admin"
-                                value={onvifCredentials.username}
-                                onChange={handleCredentialChange}
-                              />
-                            </div>
-                            <div className="form-group">
-                              <label htmlFor="onvif-password" className="block text-sm font-medium mb-1">{t('auth.password')}</label>
-                              <div className="relative">
-                                <input
-                                  type={showDiscoveryPassword ? 'text' : 'password'}
-                                  id="onvif-password"
-                                  name="password"
-                                  className="w-full rounded-md border border-input bg-background px-3 py-2 pr-11 text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                                  placeholder="password"
-                                  value={onvifCredentials.password}
-                                  onChange={handleCredentialChange}
-                                />
-                                <button
-                                  type="button"
-                                  className="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-md text-muted-foreground hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-                                  onClick={() => setShowDiscoveryPassword(prev => !prev)}
-                                  aria-label={showDiscoveryPassword ? 'Hide password' : 'Show password'}
-                                  title={showDiscoveryPassword ? 'Hide password' : 'Show password'}
-                                >
-                                  {showDiscoveryPassword ? (
-                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                      <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20C7 20 2.73 16.89 1 12c.74-2.1 2.05-3.89 3.72-5.19" />
-                                      <path d="M9.9 4.24A10.68 10.68 0 0 1 12 4c5 0 9.27 3.11 11 8a11.45 11.45 0 0 1-2.16 3.19" />
-                                      <path d="M14.12 14.12A3 3 0 0 1 9.88 9.88" />
-                                      <path d="M1 1l22 22" />
-                                    </svg>
-                                  ) : (
-                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
-                                      <circle cx="12" cy="12" r="3" />
-                                    </svg>
-                                  )}
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
+                        {renderDiscoveryCredentialFields()}
                         <button
                           type="button"
                           className="btn-primary w-full focus:outline-none focus:ring-2 focus:ring-primary"
@@ -3216,8 +3402,9 @@ export function StreamsView() {
                       <p className="mt-2 text-sm text-muted-foreground">{t('streams.selectDeviceHelp')}</p>
                     )}
                   </div>
+                  )}
 
-                  {selectedDevice && rankedDeviceProfiles.length > 0 && (
+                  {checkedDiscoveredDevices.length === 0 && selectedDevice && rankedDeviceProfiles.length > 0 && (
                     <div className="rounded-lg border border-border bg-background p-4">
                       <h4 className="text-sm font-semibold">{t('streams.availableProfilesFor', { ip: selectedDevice.ip_address })}</h4>
                       <p className="mt-1 text-xs text-muted-foreground">
