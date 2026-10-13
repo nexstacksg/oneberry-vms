@@ -15,7 +15,7 @@ import { HealthView } from './HealthView.jsx';
 import { validateSession } from '../../utils/auth-utils.js';
 import { obfuscateUrlCredentials, urlHasCredentials } from '../../utils/url-utils.js';
 import { buildDiscoveredStreamPayload } from '../../utils/discovered-stream-utils.js';
-import { connectDiscoveredDevices } from '../../utils/discovery-connect-utils.js';
+import { checkDiscoveredDevices, connectDiscoveredDevices } from '../../utils/discovery-connect-utils.js';
 import { detectedInfoToFormFields, formatDetectedSummary, isProbeableStreamUrl } from '../../utils/stream-probe-utils.js';
 import {
   VIDEO_FPS_PRESETS,
@@ -303,6 +303,9 @@ export function StreamsView() {
   const [checkedDiscoveryIps, setCheckedDiscoveryIps] = useState([]);
   const [batchConnectResults, setBatchConnectResults] = useState({});
   const [isBatchConnecting, setIsBatchConnecting] = useState(false);
+  // Result of trying the entered login on every new ONVIF camera, by IP
+  const [credentialCheckResults, setCredentialCheckResults] = useState({});
+  const [isCheckingCredentials, setIsCheckingCredentials] = useState(false);
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
   const [onvifNetworkOverride, setOnvifNetworkOverride] = useState('auto');
@@ -1314,6 +1317,7 @@ export function StreamsView() {
     setOnvifNetworkOverride(discoveryNetwork);
     setCheckedDiscoveryIps([]);
     setBatchConnectResults({});
+    setCredentialCheckResults({});
     setOnvifModalVisible(true);
     try {
       const data = await fetchJSON('/api/discovery/cameras/status', {
@@ -1400,6 +1404,10 @@ export function StreamsView() {
   // Handle ONVIF credential input change
   const handleCredentialChange = (e) => {
     const { name, value } = e.target;
+    // A different login has to be checked again before cameras can be selected
+    setCredentialCheckResults({});
+    setCheckedDiscoveryIps([]);
+    setBatchConnectResults({});
     setOnvifCredentials(prev => ({
       ...prev,
       [name]: value
@@ -1930,7 +1938,12 @@ export function StreamsView() {
   };
 
   // Only new ONVIF cameras can be connected together; RTSP-only ones need a path
-  const isDeviceCheckable = (device) => !!device?.onvif && !isDeviceAlreadyAdded(device);
+  const isDeviceCredentialCheckable = (device) => !!device?.onvif && !isDeviceAlreadyAdded(device);
+  // ...and only once they have accepted the entered login
+  const isDeviceCheckable = (device) => isDeviceCredentialCheckable(device) &&
+    credentialCheckResults[device.ip_address]?.state === 'ok';
+  const credentialCheckCandidates = discoveredDevices.filter(isDeviceCredentialCheckable);
+  const credentialCheckDone = !isCheckingCredentials && Object.keys(credentialCheckResults).length > 0;
   const checkableDiscoveredDevices = discoveredDevices.filter(isDeviceCheckable);
   const checkedDiscoveredDevices = discoveredDevices.filter(device => checkedDiscoveryIps.includes(device.ip_address));
   const allDiscoveredChecked = checkableDiscoveredDevices.length > 0 &&
@@ -1969,6 +1982,23 @@ export function StreamsView() {
     return body?.profiles || [];
   };
 
+  const checkCredentialsOnDiscoveredDevices = async () => {
+    const devices = credentialCheckCandidates;
+    if (devices.length === 0 || !onvifCredentials.username) return;
+    setIsCheckingCredentials(true);
+    setCredentialCheckResults({});
+    setCheckedDiscoveryIps([]);
+    setBatchConnectResults({});
+    const results = await checkDiscoveredDevices(devices, {
+      credentials: { username: onvifCredentials.username, password: onvifCredentials.password },
+      fetchProfiles: fetchDiscoveryProfiles,
+      onUpdate: (ip, result) => setCredentialCheckResults(previous => ({ ...previous, [ip]: result }))
+    });
+    setIsCheckingCredentials(false);
+    // Cameras that accept the login start out selected
+    setCheckedDiscoveryIps(Object.keys(results).filter(ip => results[ip].state === 'ok'));
+  };
+
   const connectCheckedDiscoveredDevices = async () => {
     if (!canCreateStreams) {
       showStatusMessage(t('streams.createStreamForbidden'), 'error');
@@ -1983,7 +2013,10 @@ export function StreamsView() {
     const results = await connectDiscoveredDevices(devices, {
       credentials,
       existingNames: streams.map(stream => stream.name),
-      fetchProfiles: fetchDiscoveryProfiles,
+      // The check already read each camera's streams with this login
+      fetchProfiles: (device, login) => (credentialCheckResults[device.ip_address]?.profiles
+        ? Promise.resolve(credentialCheckResults[device.ip_address].profiles)
+        : fetchDiscoveryProfiles(device, login)),
       createStream: (payload) => fetchJSON('/api/streams', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2089,10 +2122,8 @@ export function StreamsView() {
   };
 
   const renderDiscoveryCredentialFields = () => (
-    <div className="border-t border-border pt-4">
-      <h4 className="text-base font-semibold">{t('streams.authentication')}</h4>
-      <p className="mt-1 text-sm text-muted-foreground">{t('streams.onvifAuthenticationHelp')}</p>
-      <div className="mt-4 space-y-3">
+    <div>
+      <div className="space-y-3">
         <div className="form-group">
           <label htmlFor="onvif-username" className="block text-sm font-medium mb-1">{t('auth.username')}</label>
           <input
@@ -3156,14 +3187,14 @@ export function StreamsView() {
                         : t('streams.discoveryDeviceListHelp')}
                     </p>
                   </div>
-                  {checkableDiscoveredDevices.length > 1 && (
+                  {checkableDiscoveredDevices.length > 0 && (
                     <label className="flex cursor-pointer select-none items-center gap-2 text-sm text-muted-foreground">
                       <input
                         type="checkbox"
                         data-testid="discovery-select-all"
                         className="h-4 w-4 rounded border-input accent-primary"
                         checked={allDiscoveredChecked}
-                        disabled={isBatchConnecting}
+                        disabled={isBatchConnecting || isCheckingCredentials}
                         onChange={toggleAllDiscoveryChecked}
                       />
                       <span>
@@ -3194,6 +3225,7 @@ export function StreamsView() {
                       const isChecked = checkedDiscoveryIps.includes(device.ip_address);
                       const checkable = isDeviceCheckable(device);
                       const batchResult = batchConnectResults[device.ip_address];
+                      const loginCheck = credentialCheckResults[device.ip_address];
                       const ports = Array.isArray(device.rtsp_ports) ? device.rtsp_ports : [];
                       return (
                         <div
@@ -3223,10 +3255,13 @@ export function StreamsView() {
                               data-ip={device.ip_address}
                               className="mt-1 h-4 w-4 flex-shrink-0 rounded border-input accent-primary disabled:cursor-not-allowed disabled:opacity-40"
                               checked={isChecked}
-                              disabled={!checkable || isBatchConnecting}
+                              disabled={!checkable || isBatchConnecting || isCheckingCredentials}
                               title={checkable
-                                ? 'Select to connect several cameras with the same username and password'
-                                : (device.onvif ? t('streams.alreadyAdded') : 'RTSP-only devices are added one at a time')}
+                                ? 'This camera accepts the entered login'
+                                : !device.onvif ? 'RTSP-only devices are added one at a time'
+                                  : alreadyAdded ? t('streams.alreadyAdded')
+                                    : loginCheck?.state === 'failed' ? 'This camera does not accept the entered login'
+                                      : 'Enter a username and password, then click Check cameras'}
                               aria-label={`Select ${device.ip_address}`}
                               onClick={(event) => event.stopPropagation()}
                               onKeyDown={(event) => event.stopPropagation()}
@@ -3251,6 +3286,11 @@ export function StreamsView() {
                                   <span>{t('streams.rtspPorts')}: <span className="text-foreground">{ports.join(', ')}</span></span>
                                 )}
                               </div>
+                              {!batchResult && loginCheck?.state === 'failed' && (
+                                <p data-testid="discovery-check-result" className="mt-2 text-xs text-destructive">
+                                  {loginCheck.message}
+                                </p>
+                              )}
                               {batchResult && batchResult.state !== 'connecting' && (
                                 <p
                                   data-testid="discovery-batch-result"
@@ -3262,6 +3302,18 @@ export function StreamsView() {
                             </div>
                             </div>
                             <div className="flex items-center gap-2 sm:flex-shrink-0">
+                              {loginCheck && (
+                                <span
+                                  data-testid="discovery-login-badge"
+                                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${
+                                    loginCheck.state === 'ok' ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                      : loginCheck.state === 'failed' ? 'border-red-200 bg-red-50 text-red-700'
+                                        : 'border-border bg-muted text-muted-foreground'
+                                  }`}
+                                >
+                                  {loginCheck.state === 'ok' ? 'Login OK' : loginCheck.state === 'failed' ? 'Login failed' : 'Checking…'}
+                                </span>
+                              )}
                               <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${getDiscoveryStatusClass(device)}`}>
                                 {device.status || (device.rtsp ? 'RTSP Found' : 'Discovered')}
                               </span>
@@ -3287,14 +3339,45 @@ export function StreamsView() {
 
               <aside className="min-h-0 overflow-y-auto border-t border-border bg-muted/15 p-5 lg:border-l lg:border-t-0">
                 <div className="space-y-5">
+                  <div className="rounded-lg border border-border bg-background p-4" data-testid="discovery-login-panel">
+                    <h4 className="text-sm font-semibold">Camera login</h4>
+                    <p className="mt-1 mb-4 text-xs text-muted-foreground">
+                      Enter the username and password, then check which cameras accept it. Cameras that do can be
+                      selected and connected together.
+                    </p>
+                    {renderDiscoveryCredentialFields()}
+                    <button
+                      type="button"
+                      id="discovery-check-credentials-btn"
+                      className="btn-secondary mt-4 w-full focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
+                      disabled={isCheckingCredentials || isBatchConnecting || !onvifCredentials.username || credentialCheckCandidates.length === 0}
+                      title={credentialCheckCandidates.length === 0 ? 'No new ONVIF cameras to check' : undefined}
+                      onClick={checkCredentialsOnDiscoveredDevices}
+                    >
+                      {isCheckingCredentials
+                        ? `Checking… (${Object.values(credentialCheckResults).filter(r => r.state !== 'checking').length}/${credentialCheckCandidates.length})`
+                        : `Check cameras (${credentialCheckCandidates.length})`}
+                    </button>
+                    {credentialCheckDone && (
+                      <p data-testid="discovery-check-summary" className="mt-2 text-xs text-muted-foreground">
+                        {(() => {
+                          const ok = Object.values(credentialCheckResults).filter(r => r.state === 'ok').length;
+                          const total = Object.keys(credentialCheckResults).length;
+                          return ok === 0
+                            ? `None of the ${total} camera${total === 1 ? '' : 's'} accepted this login.`
+                            : `${ok} of ${total} camera${total === 1 ? '' : 's'} accept this login.`;
+                        })()}
+                      </p>
+                    )}
+                  </div>
                   {checkedDiscoveredDevices.length > 0 ? (
                     <div className="rounded-lg border border-border bg-background p-4" data-testid="discovery-batch-panel">
                       <h4 className="text-sm font-semibold">
                         {checkedDiscoveredDevices.length} camera{checkedDiscoveredDevices.length === 1 ? '' : 's'} selected
                       </h4>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        Use this when the selected cameras share the same username and password. Each camera is added
-                        with its main stream, plus its sub stream when it has one.
+                        Each camera is added with the login above, using its main stream plus its sub stream when it
+                        has one.
                       </p>
                       <ul className="mt-3 max-h-48 space-y-1 overflow-y-auto text-sm">
                         {checkedDiscoveredDevices.map(device => {
@@ -3316,9 +3399,6 @@ export function StreamsView() {
                           );
                         })}
                       </ul>
-                      <div className="mt-4">
-                        {renderDiscoveryCredentialFields()}
-                      </div>
                       <button
                         type="button"
                         id="discovery-connect-selected-btn"
@@ -3359,7 +3439,7 @@ export function StreamsView() {
                             {t('streams.deviceAlreadyInUseTitle')}
                           </p>
                         )}
-                        {renderDiscoveryCredentialFields()}
+                        <p className="text-xs text-muted-foreground">Uses the camera login above.</p>
                         <button
                           type="button"
                           className="btn-primary w-full focus:outline-none focus:ring-2 focus:ring-primary"

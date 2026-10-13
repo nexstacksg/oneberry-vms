@@ -1,4 +1,4 @@
-import { connectDiscoveredDevices, pickStreamProfiles } from '../js/utils/discovery-connect-utils.js';
+import { checkDiscoveredDevices, connectDiscoveredDevices, pickStreamProfiles } from '../js/utils/discovery-connect-utils.js';
 
 const hik = (ip, extra = {}) => ({
   ip_address: ip, manufacturer: 'HIKVISION', model: 'DS-2CD2622FWD-I', onvif: true,
@@ -93,5 +93,38 @@ describe('connectDiscoveredDevices', () => {
     const { options } = setup();
     await connectDiscoveredDevices([hik('172.16.3.201')], options);
     expect(options.onUpdate.mock.calls.map(([ip, r]) => `${ip}:${r.state}`)).toEqual(['172.16.3.201:connecting', '172.16.3.201:connected']);
+  });
+});
+
+describe('checkDiscoveredDevices', () => {
+  const credentials = { username: 'admin', password: 'site-pass' };
+
+  it('marks which cameras accept the login and keeps their profiles', async () => {
+    const fetchProfiles = jest.fn(async (device) => {
+      if (device.ip_address === '10.0.0.2') throw new Error('The camera rejected this username and password for ONVIF.');
+      if (device.ip_address === '10.0.0.3') return [];
+      return profiles(device.ip_address);
+    });
+    const results = await checkDiscoveredDevices([hik('10.0.0.1'), hik('10.0.0.2'), hik('10.0.0.3'), hik('10.0.0.4', { onvif: false })], { credentials, fetchProfiles });
+    expect(results['10.0.0.1']).toMatchObject({ state: 'ok', profiles: profiles('10.0.0.1') });
+    expect(results['10.0.0.2']).toMatchObject({ state: 'failed', message: expect.stringContaining('rejected') });
+    expect(results['10.0.0.3'].message).toMatch(/did not return any video/);
+    expect(results['10.0.0.4']).toBeUndefined();
+    expect(fetchProfiles).toHaveBeenCalledWith(expect.objectContaining({ ip_address: '10.0.0.1' }), credentials);
+  });
+
+  it('checks no more cameras at a time than the concurrency limit', async () => {
+    let running = 0; let peak = 0;
+    const fetchProfiles = async (device) => {
+      running++; peak = Math.max(peak, running);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      running--;
+      return profiles(device.ip_address);
+    };
+    const devices = Array.from({ length: 7 }, (_, i) => hik(`10.0.1.${i + 1}`));
+    const results = await checkDiscoveredDevices(devices, { credentials, fetchProfiles, concurrency: 3 });
+    expect(Object.values(results).every((r) => r.state === 'ok')).toBe(true);
+    expect(Object.keys(results)).toHaveLength(7);
+    expect(peak).toBe(3);
   });
 });

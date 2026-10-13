@@ -95,3 +95,49 @@ export async function connectDiscoveredDevices(devices, {
   }
   return results;
 }
+
+/**
+ * Try one username/password on several discovered cameras at once and report
+ * which of them accept it. Cameras that accept it keep their profiles so they
+ * can be connected without asking the camera again.
+ *
+ * @param {Object[]} devices
+ * @param {Object} options
+ * @param {{username: string, password: string}} options.credentials
+ * @param {Function} options.fetchProfiles   (device, credentials) => Promise<profile[]>; throws with a message
+ * @param {number} [options.concurrency=4]
+ * @param {Function} [options.onUpdate]      (ip, {state, message, profiles}) progress callback
+ * @returns {Promise<Object<string, {state: 'ok'|'failed', message: string, profiles?: Object[]}>>}
+ */
+export async function checkDiscoveredDevices(devices, {
+  credentials,
+  fetchProfiles,
+  concurrency = 4,
+  onUpdate = () => {},
+}) {
+  const results = {};
+  const report = (ip, result) => {
+    results[ip] = result;
+    onUpdate(ip, result);
+  };
+  const queue = devices.filter((device) => device?.onvif);
+  const worker = async () => {
+    while (queue.length > 0) {
+      const device = queue.shift();
+      const ip = device.ip_address;
+      report(ip, { state: 'checking', message: '' });
+      try {
+        const profiles = await fetchProfiles(device, credentials);
+        if (pickStreamProfiles(profiles).main) {
+          report(ip, { state: 'ok', message: '', profiles });
+        } else {
+          report(ip, { state: 'failed', message: 'The camera did not return any video streams' });
+        }
+      } catch (error) {
+        report(ip, { state: 'failed', message: error.message || 'Could not log in to the camera' });
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, queue.length)) }, worker));
+  return results;
+}
