@@ -1937,6 +1937,10 @@ export function StreamsView() {
     return streams.some(stream => streamMatchesDiscoveredDevice(stream, device));
   };
 
+  // Cameras that are already connected are not listed; deleting one lists it again
+  const visibleDiscoveredDevices = discoveredDevices.filter(device => !isDeviceAlreadyAdded(device));
+  const hiddenAddedDeviceCount = discoveredDevices.length - visibleDiscoveredDevices.length;
+
   // Only new ONVIF cameras can be connected together; RTSP-only ones need a path
   const isDeviceCredentialCheckable = (device) => !!device?.onvif && !isDeviceAlreadyAdded(device);
   // ...and only once they have accepted the entered login
@@ -3182,9 +3186,14 @@ export function StreamsView() {
                   <div>
                     <h4 className="text-base font-semibold">{t('streams.discoveredDevices')}</h4>
                     <p className="text-xs text-muted-foreground">
-                      {discoveredDevices.length > 0
-                        ? t('streams.discoveredDeviceCount', { count: discoveredDevices.length })
+                      {visibleDiscoveredDevices.length > 0
+                        ? t('streams.discoveredDeviceCount', { count: visibleDiscoveredDevices.length })
                         : t('streams.discoveryDeviceListHelp')}
+                      {hiddenAddedDeviceCount > 0 && (
+                        <span data-testid="discovery-hidden-added">
+                          {` · ${hiddenAddedDeviceCount} already added (hidden)`}
+                        </span>
+                      )}
                     </p>
                   </div>
                   {checkableDiscoveredDevices.length > 0 && (
@@ -3204,7 +3213,7 @@ export function StreamsView() {
                   )}
                 </div>
 
-                {discoveredDevices.length === 0 ? (
+                {visibleDiscoveredDevices.length === 0 ? (
                   <div className="rounded-lg border border-dashed border-border bg-muted/20 p-8 text-center text-muted-foreground">
                     {isDiscovering ? (
                       <div className="flex items-center justify-center">
@@ -3215,11 +3224,13 @@ export function StreamsView() {
                           <span className="animate-pulse delay-300 h-1.5 w-1.5 bg-muted-foreground rounded-full"></span>
                         </span>
                       </div>
-                    ) : t('streams.noDevicesDiscoveredYet')}
+                    ) : hiddenAddedDeviceCount > 0
+                      ? 'All cameras found on this network are already added. A camera you delete shows up here again.'
+                      : t('streams.noDevicesDiscoveredYet')}
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {discoveredDevices.map(device => {
+                    {visibleDiscoveredDevices.map(device => {
                       const alreadyAdded = isDeviceAlreadyAdded(device);
                       const isSelected = selectedDevice && selectedDevice.ip_address === device.ip_address;
                       const isChecked = checkedDiscoveryIps.includes(device.ip_address);
