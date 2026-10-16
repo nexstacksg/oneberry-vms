@@ -54,6 +54,7 @@ void handle_post_stream_refresh(const http_request_t *req, http_response_t *res)
 
 /** Rename a camera everywhere (POST /api/streams/:id/rename) */
 void handle_post_stream_rename(const http_request_t *req, http_response_t *res);
+void handle_post_stream_h264(const http_request_t *req, http_response_t *res);
 
 /**
  * @brief Handler for GET /api/settings

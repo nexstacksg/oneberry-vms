@@ -31,6 +31,9 @@
 // Buffer sizes
 #define URL_BUFFER_SIZE 2048
 #define SECONDARY_STREAM_SUFFIX "__low"
+// On-demand H.264 conversion of a go2rtc stream, for browsers that cannot
+// play the camera's own codec over WebRTC
+#define H264_STREAM_SUFFIX "__h264"
 
 extern config_t g_config;
 
@@ -366,7 +369,57 @@ bool go2rtc_stream_unregister(const char *stream_id) {
         }
     }
 
+    // Drop on-demand H.264 versions of the main and low-quality streams too
+    const char *h264_sources[] = { stream_id, secondary_stream_id };
+    for (size_t i = 0; i < sizeof(h264_sources) / sizeof(h264_sources[0]); i++) {
+        char h264_stream_id[URL_BUFFER_SIZE] = {0};
+        if (h264_sources[i][0] == '\0') continue;
+        int written = snprintf(h264_stream_id, sizeof(h264_stream_id), "%s%s", h264_sources[i], H264_STREAM_SUFFIX);
+        if (written > 0 && (size_t)written < sizeof(h264_stream_id) && go2rtc_api_stream_exists(h264_stream_id)) {
+            go2rtc_api_remove_stream(h264_stream_id);
+        }
+    }
+
     return result && secondary_result;
+}
+
+bool go2rtc_stream_ensure_h264_variant(const char *source_id, char *variant_id, size_t variant_id_size) {
+    if (!source_id || !source_id[0] || !variant_id || variant_id_size == 0) {
+        log_error("Invalid parameters for go2rtc_stream_ensure_h264_variant");
+        return false;
+    }
+    variant_id[0] = '\0';
+
+    int written = snprintf(variant_id, variant_id_size, "%s%s", source_id, H264_STREAM_SUFFIX);
+    if (written < 0 || (size_t)written >= variant_id_size) {
+        log_error("H.264 go2rtc stream id is too long for stream %s", source_id);
+        variant_id[0] = '\0';
+        return false;
+    }
+
+    if (go2rtc_api_stream_exists(variant_id)) {
+        return true;
+    }
+
+    if (!go2rtc_api_stream_exists(source_id)) {
+        log_warn("Cannot add H.264 version of %s: go2rtc has no such stream", source_id);
+        return false;
+    }
+
+    // Read the existing go2rtc stream (not the camera) and convert it with FFmpeg
+    char rtsp_url[URL_BUFFER_SIZE] = {0};
+    if (!go2rtc_stream_get_rtsp_url(source_id, rtsp_url, sizeof(rtsp_url))) {
+        return false;
+    }
+    char source[URL_BUFFER_SIZE + 32];
+    snprintf(source, sizeof(source), "ffmpeg:%s#video=h264", rtsp_url);
+
+    if (!go2rtc_api_add_stream(variant_id, source)) {
+        log_error("Failed to add H.264 version of stream %s to go2rtc", source_id);
+        return false;
+    }
+    log_info("Added on-demand H.264 version of stream %s as %s", source_id, variant_id);
+    return true;
 }
 
 bool go2rtc_stream_get_webrtc_url(const char *stream_id, char *buffer, size_t buffer_size) {

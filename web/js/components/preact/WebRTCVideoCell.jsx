@@ -17,7 +17,7 @@ import { currentDateInputValue, getLocalDayIsoRange } from '../../utils/date-uti
 import { forceNavigation } from '../../utils/navigation-utils.js';
 import { formatUtils } from './recordings/formatUtils.js';
 import { useI18n } from '../../i18n.js';
-import { useQueryClient } from '../../query-client.js';
+import { useQueryClient, fetchJSON } from '../../query-client.js';
 import { createPlayerTelemetry } from '../../utils/player-telemetry.js';
 import { StreamQualitySelector } from './StreamQualitySelector.jsx';
 import { useStreamQuality } from './useStreamQuality.js';
@@ -425,6 +425,9 @@ export function WebRTCVideoCell({
     setStreamQuality,
     streamQuality,
   } = useStreamQuality(stream);
+  // H.264 version of the selected source, used when this browser cannot play
+  // the camera's own codec (e.g. H.265 or MJPEG) over WebRTC: { from, source }
+  const [h264Fallback, setH264Fallback] = useState(null);
 
   // Component state
   const [isLoading, setIsLoading] = useState(() => {
@@ -1171,7 +1174,8 @@ export function WebRTCVideoCell({
   useEffect(() => {
     if (!stream || !stream.name || !videoRef.current) return;
 
-    const activeStreamSource = selectedStreamSource || stream.name;
+    const cameraStreamSource = selectedStreamSource || stream.name;
+    const activeStreamSource = h264Fallback?.from === cameraStreamSource ? h264Fallback.source : cameraStreamSource;
     console.log(`Initializing WebRTC connection for stream ${stream.name} using go2rtc source ${activeStreamSource}`);
     setIsLoading(true);
     setError(null);
@@ -1668,11 +1672,13 @@ export function WebRTCVideoCell({
             if (/codecs not matched/i.test(bodyText)) {
               console.error(`go2rtc cannot send stream ${activeStreamSource} to this browser over WebRTC: ${bodyText}`);
               const codecMatch = bodyText.match(/video:(\w+)/);
-              throw createOfferError(
+              const codecError = createOfferError(
                 `Camera video codec${codecMatch ? ` (${codecMatch[1]})` : ''} is not supported by this browser over WebRTC. ` +
                 'Switch this camera to high quality, or set the camera sub-stream to H.264.',
                 false
               );
+              codecError.unsupportedCodec = true;
+              throw codecError;
             }
             if (shouldRetryOfferStatus(response.status) && attempt < maxOfferRetries) {
               const delay = getJitteredOfferRetryDelay(getOfferRetryDelay(attempt));
@@ -1724,6 +1730,31 @@ export function WebRTCVideoCell({
       .catch(error => {
         console.error(`Error setting up WebRTC for stream ${stream.name}:`, error);
         clearTimeout(connectionTimeout);
+        // The browser cannot play this codec: switch to an H.264 version of the
+        // same stream, which the NVR converts only while it is being watched
+        if (error?.unsupportedCodec && activeStreamSource === cameraStreamSource) {
+          console.log(`Requesting H.264 version of ${cameraStreamSource} for this browser`);
+          (async () => {
+            try {
+              const data = await fetchJSON(`/api/streams/${encodeURIComponent(stream.name)}/h264`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ quality: cameraStreamSource.endsWith('__low') ? 'low' : 'high' }),
+                timeout: 15000,
+                retries: 0
+              });
+              if (data?.source) {
+                setH264Fallback({ from: cameraStreamSource, source: data.source });
+                return;
+              }
+            } catch (fallbackError) {
+              console.error(`Could not get an H.264 version of stream ${stream.name}:`, fallbackError);
+            }
+            setError(error.message || t('live.failedToEstablishWebrtcConnection'));
+            setIsLoading(false);
+          })();
+          return;
+        }
         if (
           error?.retryableOfferFailure &&
           reconnectAttemptsRef.current < MAX_OFFER_FAILURE_RECONNECT_ATTEMPTS
@@ -1918,7 +1949,7 @@ export function WebRTCVideoCell({
     };
 
     return cleanupWebRTCResources;
-  }, [stream?.name, retryCount, selectedStreamSource]);
+  }, [stream?.name, retryCount, selectedStreamSource, h264Fallback]);
 
   /**
    * Refresh the stream's go2rtc registration

@@ -68,6 +68,22 @@ bool go2rtc_stream_get_webrtc_url(const char *stream_id, char *buffer, size_t bu
 bool go2rtc_stream_get_rtsp_url(const char *stream_id, char *buffer, size_t buffer_size);
 
 /**
+ * @brief Make sure go2rtc has an H.264 version of a stream
+ *
+ * Registers "<source_id>__h264", which go2rtc fills by converting the
+ * existing go2rtc stream with FFmpeg. go2rtc only runs the conversion while
+ * someone is watching, and it reads the existing stream, so the camera gets
+ * no extra connection. Used for browsers that cannot play the camera's codec
+ * (e.g. H.265 or MJPEG) over WebRTC.
+ *
+ * @param source_id go2rtc stream to convert (e.g. "cam1" or "cam1__low")
+ * @param variant_id Buffer for the H.264 stream's id
+ * @param variant_id_size Size of variant_id
+ * @return true if the H.264 stream exists or was added
+ */
+bool go2rtc_stream_ensure_h264_variant(const char *source_id, char *variant_id, size_t variant_id_size);
+
+/**
  * @brief Check if the go2rtc stream module has been initialized
  *
  * @return true if initialized, false otherwise

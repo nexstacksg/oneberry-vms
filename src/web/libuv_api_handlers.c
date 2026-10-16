@@ -92,6 +92,7 @@ int register_all_libuv_handlers(http_server_handle_t server) {
     // Stream Refresh API
     http_server_register_handler(server, "/api/streams/#/refresh", "POST", handle_post_stream_refresh);
     http_server_register_handler(server, "/api/streams/#/rename", "POST", handle_post_stream_rename);
+    http_server_register_handler(server, "/api/streams/#/h264", "POST", handle_post_stream_h264);
 
     // PTZ API
     http_server_register_handler(server, "/api/streams/#/ptz/capabilities", "GET", handle_ptz_capabilities);

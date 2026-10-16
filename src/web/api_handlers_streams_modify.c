@@ -2167,6 +2167,66 @@ void handle_post_stream_refresh(const http_request_t *req, http_response_t *res)
 }
 
 /* ---------------------------------------------------------------------------
+ * H.264 for live view: POST /api/streams/:id/h264  {"quality": "low"|"high"}
+ *
+ * Browsers cannot receive H.265 or MJPEG over WebRTC. When live view hits
+ * that, it asks for an H.264 version of the same camera stream, which go2rtc
+ * converts only while someone is watching. Responds {"source": "<go2rtc id>"}.
+ * ------------------------------------------------------------------------ */
+void handle_post_stream_h264(const http_request_t *req, http_response_t *res) {
+    char stream_name[MAX_STREAM_NAME] = {0};
+    if (http_request_extract_path_param(req, "/api/streams/", stream_name, sizeof(stream_name)) != 0) {
+        http_response_set_json_error(res, 400, "Invalid stream name in URL");
+        return;
+    }
+    char *suffix = strstr(stream_name, "/h264");
+    if (suffix) {
+        *suffix = '\0';
+    }
+
+    stream_handle_t stream = get_stream_by_name(stream_name);
+    stream_config_t config;
+    if (!stream || get_stream_config(stream, &config) != 0) {
+        http_response_set_json_error(res, 404, "Stream not found");
+        return;
+    }
+
+    bool low_quality = false;
+    cJSON *body = httpd_parse_json_body(req);
+    const cJSON *quality = body ? cJSON_GetObjectItem(body, "quality") : NULL;
+    if (cJSON_IsString(quality) && strcmp(quality->valuestring, "low") == 0) {
+        low_quality = true;
+    }
+    cJSON_Delete(body);
+
+    // The low-quality stream exists only when the camera has a sub-stream
+    char source_id[MAX_STREAM_NAME + 16];
+    snprintf(source_id, sizeof(source_id), "%s%s", stream_name,
+             (low_quality && config.secondary_url[0] != '\0') ? "__low" : "");
+
+    char variant_id[MAX_STREAM_NAME + 32];
+    if (!go2rtc_stream_ensure_h264_variant(source_id, variant_id, sizeof(variant_id))) {
+        http_response_set_json_error(res, 503, "Could not start H.264 conversion for this camera");
+        return;
+    }
+
+    cJSON *response = cJSON_CreateObject();
+    if (!response) {
+        http_response_set_json_error(res, 500, "Failed to create response JSON");
+        return;
+    }
+    cJSON_AddStringToObject(response, "source", variant_id);
+    char *json_str = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+    if (!json_str) {
+        http_response_set_json_error(res, 500, "Failed to convert response JSON");
+        return;
+    }
+    http_response_set_json(res, 200, json_str);
+    free(json_str);
+}
+
+/* ---------------------------------------------------------------------------
  * Rename a camera: POST /api/streams/:id/rename  {"name": "<new name>"}
  * ------------------------------------------------------------------------ */
 
