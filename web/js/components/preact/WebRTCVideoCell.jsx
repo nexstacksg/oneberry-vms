@@ -2215,7 +2215,8 @@ export function WebRTCVideoCell({
           style={{
             width: '100%',
             height: '100%',
-            objectFit: 'cover',
+            objectFit: 'contain',
+            backgroundColor: '#000',
             position: 'absolute',
             inset: isFullscreenCell ? 0 : undefined,
             visibility: isFullscreenCell && fullscreenPlayback && isFullscreenPlaybackFrameReady ? 'hidden' : undefined
@@ -2274,11 +2275,11 @@ export function WebRTCVideoCell({
             style={{
               width: '100%',
               height: '100%',
-              objectFit: 'cover',
+              objectFit: 'contain',
               position: 'absolute',
               inset: 0,
               zIndex: 1,
-              backgroundColor: 'transparent',
+              backgroundColor: '#000',
               opacity: isFullscreenPlaybackFrameReady ? 1 : 0,
               transition: 'opacity 80ms linear'
             }}
@@ -2293,12 +2294,12 @@ export function WebRTCVideoCell({
             style={{
               width: '100%',
               height: '100%',
-              objectFit: 'cover',
+              objectFit: 'contain',
               position: 'absolute',
               inset: 0,
               zIndex: 2,
               pointerEvents: 'none',
-              backgroundColor: 'black'
+              backgroundColor: '#000'
             }}
           />
         )}
