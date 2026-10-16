@@ -207,6 +207,29 @@ void test_set_recording_retention_tier(void) {
     TEST_ASSERT_EQUAL_INT(RETENTION_TIER_CRITICAL, got.retention_tier);
 }
 
+/* Recordings created the way the writers create them can be freed under disk pressure */
+void test_new_recording_defaults_allow_disk_pressure_cleanup(void) {
+    recording_metadata_t m;
+    recording_metadata_init(&m);
+    strncpy(m.stream_name, "cam1", sizeof(m.stream_name) - 1);
+    strncpy(m.file_path, "/rec/new.mp4", sizeof(m.file_path) - 1);
+    m.start_time = time(NULL) - 120;
+    m.end_time = m.start_time + 60;
+    m.is_complete = true;
+    uint64_t id = add_recording_metadata(&m);
+    TEST_ASSERT_NOT_EQUAL(0, id);
+
+    recording_metadata_t got;
+    get_recording_metadata_by_id(id, &got);
+    TEST_ASSERT_EQUAL_INT(RETENTION_TIER_STANDARD, got.retention_tier);
+    TEST_ASSERT_TRUE(got.disk_pressure_eligible);
+
+    recording_metadata_t candidates[4];
+    int count = get_recordings_for_pressure_cleanup(candidates, 4);
+    TEST_ASSERT_EQUAL_INT(1, count);
+    TEST_ASSERT_EQUAL_UINT64(id, candidates[0].id);
+}
+
 /* set_recording_disk_pressure_eligible */
 void test_set_recording_disk_pressure_eligible(void) {
     time_t now = time(NULL);
@@ -253,6 +276,7 @@ int main(void) {
     RUN_TEST(test_get_recording_metadata_paginated);
     RUN_TEST(test_get_recording_metadata_paginated_supports_multi_value_detection_labels_and_tags);
     RUN_TEST(test_set_recording_retention_tier);
+    RUN_TEST(test_new_recording_defaults_allow_disk_pressure_cleanup);
     RUN_TEST(test_set_recording_disk_pressure_eligible);
     RUN_TEST(test_set_recording_retention_override);
     RUN_TEST(test_get_stream_storage_bytes);

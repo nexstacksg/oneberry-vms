@@ -314,7 +314,7 @@ static bool add_recording_to_db(const recording_file_info_t *info) {
     uint64_t recording_id;
     
     // Fill in metadata
-    memset(&metadata, 0, sizeof(recording_metadata_t));
+    recording_metadata_init(&metadata);
     strncpy(metadata.stream_name, info->stream_name, sizeof(metadata.stream_name) - 1);
     strncpy(metadata.file_path, info->path, sizeof(metadata.file_path) - 1);
     metadata.start_time = info->start_time;

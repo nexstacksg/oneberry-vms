@@ -1498,7 +1498,8 @@ static int udt_start_recording(unified_detection_ctx_t *ctx) {
 
     // Add recording to database at START (so it appears in recordings list immediately)
     // It will be updated with end_time, size, and is_complete=true when recording stops
-    recording_metadata_t metadata = {0};
+    recording_metadata_t metadata;
+    recording_metadata_init(&metadata);
     strncpy(metadata.file_path, ctx->current_recording_path, sizeof(metadata.file_path) - 1);
     strncpy(metadata.stream_name, ctx->stream_name, sizeof(metadata.stream_name) - 1);
     metadata.start_time = now;
@@ -1570,7 +1571,8 @@ static int udt_stop_recording(unified_detection_ctx_t *ctx) {
     } else if (ctx->current_recording_path[0] != '\0') {
         // Fallback: if no recording_id, try to add a new record (shouldn't happen normally)
         log_warn("[%s] No recording ID found, creating new database entry", ctx->stream_name);
-        recording_metadata_t metadata = {0};
+        recording_metadata_t metadata;
+        recording_metadata_init(&metadata);
         strncpy(metadata.file_path, ctx->current_recording_path, sizeof(metadata.file_path) - 1);
         strncpy(metadata.stream_name, ctx->stream_name, sizeof(metadata.stream_name) - 1);
         metadata.start_time = start_time;

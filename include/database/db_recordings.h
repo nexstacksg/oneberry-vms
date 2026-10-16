@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 #include <time.h>
 
 // Recording metadata structure
@@ -36,6 +37,18 @@ typedef struct {
 #define RETENTION_TIER_IMPORTANT  1
 #define RETENTION_TIER_STANDARD   2
 #define RETENTION_TIER_EPHEMERAL  3
+
+/**
+ * Clear recording metadata and set the storage defaults a new recording should
+ * get: standard retention tier, deletable under disk pressure. A zeroed struct
+ * would mean "Critical" and "never delete", which keeps disk cleanup from ever
+ * freeing space.
+ */
+static inline void recording_metadata_init(recording_metadata_t *metadata) {
+    memset(metadata, 0, sizeof(*metadata));
+    metadata->retention_tier = RETENTION_TIER_STANDARD;
+    metadata->disk_pressure_eligible = true;
+}
 
 /**
  * Add recording metadata to the database

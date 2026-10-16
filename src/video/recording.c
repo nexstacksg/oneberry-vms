@@ -99,7 +99,7 @@ uint64_t start_recording(const char *stream_name, const char *output_path) {
 
     // Create recording metadata
     recording_metadata_t metadata;
-    memset(&metadata, 0, sizeof(recording_metadata_t));
+    recording_metadata_init(&metadata);
 
     // Default to STANDARD tier so recordings aren't deleted immediately;
     // RETENTION_TIER_CRITICAL (0) would use 3× multiplier but the zero

@@ -231,7 +231,7 @@ static void on_segment_started_cb(void *user_ctx, time_t keyframe_time, int64_t 
             : actual_keyframe_time;
 
         recording_metadata_t metadata;
-        memset(&metadata, 0, sizeof(recording_metadata_t));
+        recording_metadata_init(&metadata);
         strncpy(metadata.stream_name, stream_name, sizeof(metadata.stream_name) - 1);
         strncpy(metadata.file_path, thread_ctx->writer->output_path, sizeof(metadata.file_path) - 1);
         metadata.start_time = start_time;

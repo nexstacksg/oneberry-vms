@@ -652,6 +652,14 @@ static const char migration_0042_down[] =
     "DROP INDEX IF EXISTS idx_recordings_stream_complete_time;\n"
     "SELECT 1;";
 
+static const char migration_0043_up[] =
+    "UPDATE recordings\n"
+    "SET retention_tier = 2, disk_pressure_eligible = 1\n"
+    "WHERE protected = 0 AND retention_tier = 0 AND disk_pressure_eligible = 0;";
+
+static const char migration_0043_down[] =
+    "SELECT 1;";
+
 static const migration_t embedded_migrations_data[] = {
     {
         .version = "0001",
@@ -947,8 +955,15 @@ static const migration_t embedded_migrations_data[] = {
         .sql_down = migration_0042_down,
         .is_embedded = true
     },
+    {
+        .version = "0043",
+        .description = "fix_recording_storage_defaults",
+        .sql_up = migration_0043_up,
+        .sql_down = migration_0043_down,
+        .is_embedded = true
+    },
 };
 
-#define EMBEDDED_MIGRATIONS_COUNT 42
+#define EMBEDDED_MIGRATIONS_COUNT 43
 
 #endif /* DB_EMBEDDED_MIGRATIONS_H */
