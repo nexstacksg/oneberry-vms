@@ -113,18 +113,25 @@
     min-height: 0;
     transition: grid-template-columns 260ms ease, grid-template-rows 260ms ease, height 260ms ease;
     width: 100%;
-    padding: 0;
+    /* --cell-pad-x/y: black space added by Live View so cells keep the layout's cell shape */
+    padding: var(--cell-pad-y, 0px) var(--cell-pad-x, 0px);
     /* Column/row counts are injected as CSS custom properties by the component */
-    grid-template-columns: repeat(var(--grid-cols, 2), 1fr);
-    grid-template-rows: repeat(var(--grid-rows, 2), 1fr);
+    /* minmax(0, 1fr): tile contents must not stretch tracks, or cells lose their shape */
+    grid-template-columns: repeat(var(--grid-cols, 2), minmax(0, 1fr));
+    grid-template-rows: repeat(var(--grid-rows, 2), minmax(0, 1fr));
 }
 
 .video-container.is-workspace-grid {
     align-items: stretch;
     justify-items: stretch;
-    gap: 0.55rem;
+    /* No gap between the 48 fine tracks (it would eat the space); tiles are
+       spaced by margins instead. Keep --tile-gap-px in px: Live View reads it. */
+    gap: 0;
+    --tile-gap-px: 8px;
     height: calc(100dvh - 2.25rem - 8px);
-    padding: clamp(0.55rem, 0.9vw, 0.9rem);
+    padding:
+        calc(clamp(0.55rem, 0.9vw, 0.9rem) + var(--cell-pad-y, 0px))
+        calc(clamp(0.55rem, 0.9vw, 0.9rem) + var(--cell-pad-x, 0px));
     border-radius: 0 0 0.75rem 0.75rem;
     background:
         linear-gradient(180deg, hsl(var(--muted) / 0.46), hsl(var(--background) / 0.92)),
@@ -540,7 +547,7 @@
 
 .video-container.is-workspace-grid.is-single-camera {
     gap: 0;
-    padding: 0.75rem;
+    padding: calc(0.75rem + var(--cell-pad-y, 0px)) calc(0.75rem + var(--cell-pad-x, 0px));
 }
 
 .video-container.is-workspace-grid.is-single-camera .live-workspace-tile {
@@ -548,8 +555,8 @@
 }
 
 .video-container.is-workspace-grid.is-single-camera-view {
-    grid-template-columns: repeat(var(--grid-cols, 48), 1fr);
-    grid-template-rows: repeat(var(--grid-rows, 27), 1fr);
+    grid-template-columns: repeat(var(--grid-cols, 48), minmax(0, 1fr));
+    grid-template-rows: repeat(var(--grid-rows, 48), minmax(0, 1fr));
 }
 
 .video-container.is-workspace-grid.is-single-camera-view .live-workspace-tile.is-single-camera-active {
@@ -1552,4 +1559,91 @@
     color: white;
     font-size: 14px;
     text-align: center;
+}
+
+/* Layout menu: cell shape (Nx Witness style) */
+.live-workspace-menu-group {
+    padding: 0.35rem 0.4rem 0.5rem;
+    margin-bottom: 0.25rem;
+    border-bottom: 1px solid hsl(var(--border) / 0.7);
+}
+
+.live-workspace-menu-label {
+    display: block;
+    margin: 0 0.15rem 0.35rem;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground));
+}
+
+.live-workspace-menu-options {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.25rem;
+}
+
+.live-workspace-menu .live-workspace-menu-options button {
+    padding: 0.3rem 0.25rem;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    border: 1px solid hsl(var(--border));
+}
+
+.live-workspace-menu .live-workspace-menu-options button.is-active {
+    border-color: hsl(var(--primary));
+    background: hsl(var(--primary) / 0.12);
+    color: hsl(var(--primary));
+    font-weight: 600;
+}
+
+/* Moving a tile: other tiles and empty slots are drop targets; dropping swaps places */
+.video-container.is-moving-tile .live-workspace-tile:not(.is-moving),
+.video-container.is-moving-tile .live-workspace-slot {
+    outline: 1px dashed hsl(var(--primary) / 0.45);
+    outline-offset: -1px;
+}
+
+.video-container.is-moving-tile .live-workspace-tile.is-moving {
+    opacity: 0.85;
+    z-index: 6;
+    cursor: grabbing;
+}
+
+.live-workspace-tile.is-drop-target,
+.live-workspace-slot.is-drop-target {
+    outline: 2px solid hsl(var(--primary)) !important;
+    outline-offset: -2px;
+}
+
+.live-workspace-tile.is-drop-target::after {
+    content: 'Swap';
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: hsl(var(--primary) / 0.18);
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    pointer-events: none;
+}
+
+/* Space between workspace tiles (half the tile gap on every side) */
+.video-container.is-workspace-grid:not(.is-mobile-workspace-stack) > .live-workspace-tile,
+.video-container.is-workspace-grid:not(.is-mobile-workspace-stack) > .live-workspace-slot {
+    margin: calc(var(--tile-gap-px) / 2);
+    width: auto;
+    height: auto;
+    min-height: 0;
+}
+
+.video-container.is-workspace-grid.is-single-camera,
+.video-container.is-workspace-grid.is-single-camera-view {
+    --tile-gap-px: 0px;
 }

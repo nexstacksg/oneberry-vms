@@ -450,6 +450,29 @@ export function StreamsView() {
   });
   const cameraFolders = Array.isArray(cameraFoldersData?.folders) ? cameraFoldersData.folders : [];
 
+  // Per-camera display settings (forced picture shape), shared with Live View
+  const { data: cameraDisplayData } = useQuery(['camera-display'], '/api/camera-display', {
+    timeout: 10000,
+    retries: 1,
+    retryDelay: 1000
+  });
+  const [displayAspectRatio, setDisplayAspectRatio] = useState('auto');
+  const [savedDisplayAspectRatio, setSavedDisplayAspectRatio] = useState('auto');
+  const saveCameraDisplayAspect = async (cameraName, aspectRatio) => {
+    try {
+      const saved = await fetchJSON(`/api/camera-display/${encodeURIComponent(cameraName)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ aspectRatio }),
+        timeout: 10000,
+        retries: 0
+      });
+      queryClient.setQueryData(['camera-display'], saved);
+    } catch (error) {
+      showStatusMessage(`Camera saved, but its aspect ratio could not be saved: ${error.message}`, 'error', 8000);
+    }
+  };
+
   // Put a newly created camera into the folder chosen in the Add Camera form
   const addCameraToFolder = async (cameraName, folderId) => {
     const folders = queryClient.getQueryData(['camera-folders'])?.folders || cameraFolders;
@@ -689,6 +712,9 @@ export function StreamsView() {
         if (newCameraFolderId) {
           addCameraToFolder(variables?.name, newCameraFolderId);
         }
+      }
+      if (variables?.name && displayAspectRatio !== savedDisplayAspectRatio) {
+        saveCameraDisplayAspect(variables.name, displayAspectRatio);
       }
       closeModal();
       // Invalidate and refetch streams data (and what refers to cameras by name)
@@ -1201,6 +1227,8 @@ export function StreamsView() {
     });
     resetUrlProbe();
     setNewCameraFolderId('');
+    setDisplayAspectRatio('auto');
+    setSavedDisplayAspectRatio('auto');
     setIsEditing(false);
     setIsCloning(false);
     setModalVisible(true);
@@ -1225,6 +1253,9 @@ export function StreamsView() {
       const motion = data.motion_config || null;
 
       setCurrentStream(buildStreamFormState(stream, motion));
+      const currentAspect = cameraDisplayData?.cameras?.[stream.name || streamId]?.aspectRatio || 'auto';
+      setDisplayAspectRatio(currentAspect);
+      setSavedDisplayAspectRatio(currentAspect);
       resetUrlProbe();
       setIsEditing(true);
       setModalVisible(true);
@@ -3101,6 +3132,8 @@ export function StreamsView() {
           cameraFolders={cameraFolders}
           folderId={newCameraFolderId}
           onFolderChange={setNewCameraFolderId}
+          displayAspectRatio={displayAspectRatio}
+          onDisplayAspectRatioChange={setDisplayAspectRatio}
           onSwitchToSubnetScan={canCreateStreams ? () => { closeModal(); setSubnetScanVisible(true); } : undefined}
           onTestMotion={triggerTestMotionEvent}
           onSave={handleSubmit}

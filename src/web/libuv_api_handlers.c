@@ -16,6 +16,7 @@
 #include "web/api_handlers_health.h"
 #include "web/api_handlers_settings.h"
 #include "web/api_handlers_camera_folders.h"
+#include "web/api_handlers_camera_display.h"
 #include "web/api_handlers_subnet_scan.h"
 #include "web/api_handlers_system.h"
 #include "web/api_handlers_zones.h"
@@ -121,6 +122,8 @@ int register_all_libuv_handlers(http_server_handle_t server) {
     http_server_register_handler(server, "/api/live-layouts", "PUT", handle_put_live_layouts);
     http_server_register_handler(server, "/api/camera-folders", "GET", handle_get_camera_folders);
     http_server_register_handler(server, "/api/camera-folders", "PUT", handle_put_camera_folders);
+    http_server_register_handler(server, "/api/camera-display", "GET", handle_get_camera_display);
+    http_server_register_handler(server, "/api/camera-display/#", "PUT", handle_put_camera_display);
 
     // ICE Servers API (WebRTC TURN/STUN configuration)
     http_server_register_handler(server, "/api/ice-servers", "GET", handle_get_ice_servers);

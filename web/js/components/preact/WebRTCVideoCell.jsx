@@ -23,6 +23,7 @@ import { StreamQualitySelector } from './StreamQualitySelector.jsx';
 import { useStreamQuality } from './useStreamQuality.js';
 import { updateStreamRecordingQuality } from '../../utils/stream-quality-utils.js';
 import { captureVideoSnapshot, createPrivacyHandlers } from './video-cell-helpers.js';
+import { getForcedAspectVideoStyle } from '../../utils/aspect-ratio-utils.js';
 import { PrivacyModeOverlays, StreamStatusBadge } from './VideoCellOverlays.jsx';
 import { LivePreviewPoster } from './LivePreviewPoster.jsx';
 import 'webrtc-adapter';
@@ -407,6 +408,8 @@ const CONNECTION_QUALITY_THRESHOLDS = {
  * @param {Object} props.stream - Stream object
  * @param {Function} props.onToggleFullscreen - Fullscreen toggle handler
  * @param {string} props.streamId - Stream ID for stable reference
+ * @param {string} [props.forcedAspectRatio] - Show the picture with this shape ("16:9"…), or "auto"
+ * @param {Function} [props.onVideoDimensions] - (streamName, width, height) when the picture size is known
  * @returns {JSX.Element} WebRTCVideoCell component
  */
 export function WebRTCVideoCell({
@@ -417,10 +420,14 @@ export function WebRTCVideoCell({
   showLabels = true,
   showControls = true,
   globalShowDetections = true,
-  isPageFullscreen = false
+  isPageFullscreen = false,
+  forcedAspectRatio = 'auto',
+  onVideoDimensions
 }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
+  const forcedVideoStyle = getForcedAspectVideoStyle(forcedAspectRatio);
+  const hasForcedAspect = Object.keys(forcedVideoStyle).length > 0;
   const {
     hasLowQuality,
     selectedStreamSource,
@@ -2317,7 +2324,9 @@ export function WebRTCVideoCell({
         display: isFullscreenCell ? 'flex' : 'block',
         flexDirection: isFullscreenCell ? 'column' : 'row',
         minHeight: isFullscreenCell ? 0 : undefined,
-        overflow: 'hidden'
+        overflow: 'hidden',
+        // A forced picture shape is sized against the cell (or the fullscreen stage)
+        containerType: hasForcedAspect && !isFullscreenCell ? 'size' : undefined
       }}
     >
       <div
@@ -2329,7 +2338,8 @@ export function WebRTCVideoCell({
           minHeight: isFullscreenCell ? 0 : undefined,
           width: isFullscreenCell ? '100%' : undefined,
           overflow: isFullscreenCell ? 'hidden' : undefined,
-          backgroundColor: isFullscreenCell ? 'black' : undefined
+          backgroundColor: isFullscreenCell ? 'black' : undefined,
+          containerType: hasForcedAspect && isFullscreenCell ? 'size' : undefined
         }}
       >
         {/* Video element */}
@@ -2348,8 +2358,11 @@ export function WebRTCVideoCell({
             backgroundColor: '#000',
             position: 'absolute',
             inset: isFullscreenCell ? 0 : undefined,
-            visibility: isFullscreenCell && fullscreenPlayback && isFullscreenPlaybackFrameReady ? 'hidden' : undefined
+            visibility: isFullscreenCell && fullscreenPlayback && isFullscreenPlaybackFrameReady ? 'hidden' : undefined,
+            ...forcedVideoStyle
           }}
+          onLoadedMetadata={(event) => onVideoDimensions?.(stream.name, event.currentTarget.videoWidth, event.currentTarget.videoHeight)}
+          onResize={(event) => onVideoDimensions?.(stream.name, event.currentTarget.videoWidth, event.currentTarget.videoHeight)}
         />
 
         <LivePreviewPoster
@@ -2416,7 +2429,8 @@ export function WebRTCVideoCell({
               zIndex: 1,
               backgroundColor: '#000',
               opacity: isFullscreenPlaybackFrameReady ? 1 : 0,
-              transition: 'opacity 80ms linear'
+              transition: 'opacity 80ms linear',
+              ...forcedVideoStyle
             }}
           />
         )}

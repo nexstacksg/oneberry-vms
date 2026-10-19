@@ -21,6 +21,7 @@ import { useStreamQuality } from './useStreamQuality.js';
 import { updateStreamRecordingQuality } from '../../utils/stream-quality-utils.js';
 import { captureVideoSnapshot, createPrivacyHandlers } from './video-cell-helpers.js';
 import { PrivacyModeOverlays, StreamStatusBadge } from './VideoCellOverlays.jsx';
+import { getForcedAspectVideoStyle } from '../../utils/aspect-ratio-utils.js';
 import { LivePreviewPoster } from './LivePreviewPoster.jsx';
 
 /**
@@ -40,8 +41,11 @@ export function MSEVideoCell({
   showLabels = true,
   showControls = true,
   globalShowDetections = true,
-  isPageFullscreen = false
+  isPageFullscreen = false,
+  forcedAspectRatio = 'auto',
+  onVideoDimensions
 }) {
+  const forcedVideoStyle = getForcedAspectVideoStyle(forcedAspectRatio);
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const {
@@ -531,7 +535,8 @@ export function MSEVideoCell({
       style={{
         position: 'relative',
         pointerEvents: 'auto',
-        zIndex: 1
+        zIndex: 1,
+        containerType: Object.keys(forcedVideoStyle).length > 0 ? 'size' : undefined
       }}
     >
       {/* Video element */}
@@ -542,7 +547,9 @@ export function MSEVideoCell({
         autoPlay
         muted
         playsInline
-        style={{ width: '100%', height: '100%', objectFit: 'contain', backgroundColor: '#000' }}
+        style={{ width: '100%', height: '100%', objectFit: 'contain', backgroundColor: '#000', ...forcedVideoStyle }}
+        onLoadedMetadata={(event) => onVideoDimensions?.(stream.name, event.currentTarget.videoWidth, event.currentTarget.videoHeight)}
+        onResize={(event) => onVideoDimensions?.(stream.name, event.currentTarget.videoWidth, event.currentTarget.videoHeight)}
       />
 
       <LivePreviewPoster

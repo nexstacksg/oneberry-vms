@@ -475,6 +475,14 @@ static cJSON *normalize_live_layouts_json(cJSON *input, const user_t *user, bool
         cJSON_AddStringToObject(layout, "name", layout_name);
         if (cols > 0) cJSON_AddNumberToObject(layout, "cols", cols);
         if (rows > 0) cJSON_AddNumberToObject(layout, "rows", rows);
+        // Shape of the layout's cells ("auto" follows the first camera)
+        const cJSON *cell_aspect = cJSON_GetObjectItem(input_layout, "cellAspect");
+        if (cJSON_IsString(cell_aspect) &&
+            (strcmp(cell_aspect->valuestring, "4:3") == 0 || strcmp(cell_aspect->valuestring, "16:9") == 0 ||
+             strcmp(cell_aspect->valuestring, "1:1") == 0 || strcmp(cell_aspect->valuestring, "3:4") == 0 ||
+             strcmp(cell_aspect->valuestring, "9:16") == 0)) {
+            cJSON_AddStringToObject(layout, "cellAspect", cell_aspect->valuestring);
+        }
         cJSON_AddItemToObject(layout, "tiles", tiles);
         cJSON_AddItemToObject(layout, "cameras", cameras);
 

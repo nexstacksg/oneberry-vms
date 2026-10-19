@@ -301,6 +301,8 @@ export function StreamConfigModal({
   cameraFolders = [],
   folderId = '',
   onFolderChange,
+  displayAspectRatio = 'auto',
+  onDisplayAspectRatioChange,
   onSwitchToSubnetScan,
   onTestMotion,
   onSave,
@@ -587,6 +589,28 @@ export function StreamConfigModal({
                       ))}
                     </select>
                     <p className="mt-1 text-xs text-muted-foreground">The camera is shown under this folder in the sidebar Camera List.</p>
+                  </div>
+                )}
+
+                {onDisplayAspectRatioChange && (
+                  <div className="md:col-span-2">
+                    <label htmlFor="stream-display-aspect" className="block text-sm font-medium mb-2">Aspect ratio</label>
+                    <select
+                      id="stream-display-aspect"
+                      className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                      value={displayAspectRatio}
+                      onChange={(event) => onDisplayAspectRatioChange(event.target.value)}
+                    >
+                      <option value="auto">Auto (use the camera picture)</option>
+                      <option value="16:9">16:9</option>
+                      <option value="4:3">4:3</option>
+                      <option value="1:1">1:1</option>
+                      <option value="3:4">3:4</option>
+                      <option value="9:16">9:16</option>
+                    </select>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Forces the shape the picture is shown with in Live View, for cameras that report the wrong one.
+                    </p>
                   </div>
                 )}
 

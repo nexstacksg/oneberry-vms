@@ -32,6 +32,7 @@
 #include "database/db_auth.h"
 #include "database/db_streams.h"
 #include "database/db_system_settings.h"
+#include "web/api_handlers_camera_display.h"
 
 
 /**
@@ -2366,6 +2367,7 @@ void handle_post_stream_rename(const http_request_t *req, http_response_t *res) 
     if (db_result == 0) {
         rename_camera_in_setting("live_view_layouts", old_name, new_name);
         rename_camera_in_setting("camera_folders", old_name, new_name);
+        camera_display_rename_camera(old_name, new_name);
         for (int i = 0; i < g_config.max_streams; i++) {
             if (strcmp(g_config.streams[i].name, old_name) == 0) {
                 g_config.streams[i].name[0] = '\0';

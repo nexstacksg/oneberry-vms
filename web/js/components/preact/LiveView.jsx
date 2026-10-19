@@ -20,10 +20,23 @@ import { buildBuildingTree } from '../../utils/building-hierarchy.js';
 import { getAuthHeaders } from '../../utils/auth-utils.js';
 import { useI18n } from '../../i18n.js';
 
+import {
+  CELL_ASPECT_OPTIONS,
+  computeCellPadding,
+  findTileAtPoint,
+  getTileArrangement,
+  parseAspectRatio,
+  swapTilePlaces,
+} from '../../utils/aspect-ratio-utils.js';
+
+// Cell shape of the unsaved workspace (saved layouts keep their own)
+const LIVE_CELL_ASPECT_STORAGE_KEY = 'lightnvr-live-cell-aspect';
 const WORKSPACE_GRID_COLS = 48;
-const WORKSPACE_GRID_ROWS = 27;
+// Same as the columns, so 2x2, 3x3, 4x4, 6x6 and 8x8 split into equal rows
+// (cells keep the layout's cell shape). Older layouts saved as 48x27 are scaled.
+const WORKSPACE_GRID_ROWS = 48;
 const DEFAULT_WORKSPACE_TILE_W = 24;
-const DEFAULT_WORKSPACE_TILE_H = 13;
+const DEFAULT_WORKSPACE_TILE_H = 24;
 const PENDING_BLANK_WORKSPACE_CAMERAS_KEY = 'oneberry.pendingBlankWorkspaceCameras';
 const WORKSPACE_LAYOUT_PRESETS = [
   { count: 4, cols: 2, rows: 2, label: '2x2' },
@@ -133,6 +146,22 @@ function createWorkspaceSlot(tile = {}) {
   };
 }
 
+// The grid's area inside its padding (Live View pads it to keep the cell shape)
+function getGridContentRect(grid) {
+  const rect = grid.getBoundingClientRect();
+  const styles = window.getComputedStyle(grid);
+  const left = Number.parseFloat(styles.paddingLeft) || 0;
+  const right = Number.parseFloat(styles.paddingRight) || 0;
+  const top = Number.parseFloat(styles.paddingTop) || 0;
+  const bottom = Number.parseFloat(styles.paddingBottom) || 0;
+  return {
+    left: rect.left + left,
+    top: rect.top + top,
+    width: Math.max(1, rect.width - left - right),
+    height: Math.max(1, rect.height - top - bottom),
+  };
+}
+
 function createLiveLayoutId() {
   return `layout-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -181,6 +210,7 @@ function normalizeLiveLayouts(data = {}) {
             userId: layout.userId ?? layout.ownerUserId ?? layout.owner_user_id,
             name: String(layout.name).trim(),
             cols: Number.isFinite(Number(layout.cols)) ? Math.max(1, Math.floor(Number(layout.cols))) : undefined,
+            cellAspect: CELL_ASPECT_OPTIONS.includes(layout.cellAspect) ? layout.cellAspect : 'auto',
             rows: Number.isFinite(Number(layout.rows)) ? Math.max(1, Math.floor(Number(layout.rows))) : undefined,
             tiles,
             slots,
@@ -523,6 +553,20 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const [workspaceTiles, setWorkspaceTiles] = useState([]);
   const [workspaceStarted, setWorkspaceStarted] = useState(true);
   const [workspaceAutoGrid, setWorkspaceAutoGrid] = useState(true);
+  // Shape of the layout's cells, like Nx Witness: 'auto' follows the first camera
+  const [layoutCellAspect, setLayoutCellAspect] = useState(() => {
+    try {
+      const stored = localStorage.getItem(LIVE_CELL_ASPECT_STORAGE_KEY);
+      return CELL_ASPECT_OPTIONS.includes(stored) ? stored : 'auto';
+    } catch {
+      return 'auto';
+    }
+  });
+  // Picture shape each camera actually sends, reported by the video cells
+  const [videoAspectByCamera, setVideoAspectByCamera] = useState({});
+  // Tile being dragged, and the tile or empty slot it would swap with
+  const [movingTileId, setMovingTileId] = useState('');
+  const [tileDropTargetId, setTileDropTargetId] = useState('');
   const [activeLayoutId, setActiveLayoutId] = useState(() => {
     const p = new URLSearchParams(window.location.search);
     const layoutParam = p.get('layout');
@@ -549,6 +593,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const saveLayoutTimeoutRef = useRef(null);
   const workspaceGridRef = useRef(null);
   const workspacePointerRef = useRef(null);
+  const workspaceTilesRef = useRef([]);
   const workspaceAutoExpandedDropRef = useRef(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [layoutPresetMenuOpen, setLayoutPresetMenuOpen] = useState(false);
@@ -766,6 +811,29 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       refetchInterval: 30000
     }
   );
+
+  // Per-camera display settings (forced picture shape)
+  const { data: cameraDisplayData } = useQuery(
+    ['camera-display'],
+    '/api/camera-display',
+    {
+      timeout: 10000,
+      retries: 1,
+      retryDelay: 1000
+    },
+    {
+      refetchInterval: 60000
+    }
+  );
+  const cameraDisplay = cameraDisplayData?.cameras || {};
+
+  const handleVideoDimensions = useCallback((cameraName, width, height) => {
+    if (!cameraName || !(width > 0) || !(height > 0)) return;
+    const aspect = width / height;
+    setVideoAspectByCamera((previous) => (
+      Math.abs((previous[cameraName] || 0) - aspect) < 0.01 ? previous : { ...previous, [cameraName]: aspect }
+    ));
+  }, []);
 
   // Update loading state based on streams query status
   useEffect(() => {
@@ -1092,6 +1160,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setWorkspaceTiles([...tiles, ...slots]);
     setWorkspaceStarted(true);
     setWorkspaceAutoGrid(tiles.length === 0 && slots.length === 0);
+    setLayoutCellAspect(activeLayout.cellAspect || 'auto');
     setLayoutEditMode(false);
     setCurrentPage(0);
 
@@ -1101,6 +1170,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       id: activeLayout.id,
       cols: WORKSPACE_GRID_COLS,
       rows: WORKSPACE_GRID_ROWS,
+      cellAspect: activeLayout.cellAspect || 'auto',
       tiles: serializedTiles,
       slots: serializedSlots,
     });
@@ -1116,7 +1186,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       };
     }
 
-    const rect = grid.getBoundingClientRect();
+    const rect = getGridContentRect(grid);
     const styles = window.getComputedStyle(grid);
     const gap = Number.parseFloat(styles.columnGap || styles.gap || '0') || 0;
     const safeCols = Math.max(1, workspaceGridCols);
@@ -1355,7 +1425,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     const grid = workspaceGridRef.current;
     if (!grid) return { width: 1, height: 1 };
 
-    const rect = grid.getBoundingClientRect();
+    const rect = getGridContentRect(grid);
     const styles = window.getComputedStyle(grid);
     const gap = Number.parseFloat(styles.columnGap || styles.gap || '0') || 0;
     const safeCols = Math.max(1, workspaceGridCols);
@@ -1376,6 +1446,14 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     const dy = Math.round((event.clientY - state.startY) / cellSize.height);
 
     if (state.mode === 'move') {
+      // Over another tile or an empty slot: drop there to swap places (Nx Witness style)
+      const dropTarget = findTileAtPoint(workspaceTilesRef.current, getWorkspaceGridPoint(event), state.instanceId);
+      const dropTargetId = dropTarget?.instanceId || '';
+      if (dropTargetId !== state.dropTargetId) {
+        state.dropTargetId = dropTargetId;
+        setTileDropTargetId(dropTargetId);
+      }
+      if (dropTargetId) return;
       if (dx === 0 && dy === 0) return;
       setWorkspaceAutoGrid(false);
       updateWorkspaceTile(state.instanceId, {
@@ -1405,9 +1483,16 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       setWorkspaceAutoGrid(false);
     }
     updateWorkspaceTile(state.instanceId, nextTile);
-  }, [getWorkspaceCellSize, updateWorkspaceTile]);
+  }, [getWorkspaceCellSize, getWorkspaceGridPoint, updateWorkspaceTile]);
 
   const finishWorkspacePointer = useCallback(() => {
+    const state = workspacePointerRef.current;
+    if (state?.mode === 'move' && state.dropTargetId) {
+      const { instanceId, dropTargetId } = state;
+      setWorkspaceTiles((previousTiles) => swapTilePlaces(previousTiles, instanceId, dropTargetId));
+    }
+    setMovingTileId('');
+    setTileDropTargetId('');
     workspacePointerRef.current = null;
     window.removeEventListener('pointermove', handleWorkspacePointerMove);
     window.removeEventListener('pointerup', finishWorkspacePointer);
@@ -1432,9 +1517,13 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     if (mode === 'resize') {
       setWorkspaceAutoGrid(false);
     }
+    if (mode === 'move') {
+      setMovingTileId(tile.instanceId);
+    }
     workspacePointerRef.current = {
       mode,
       edges,
+      dropTargetId: '',
       instanceId: tile.instanceId,
       startTile: { ...tile },
       startX: event.clientX,
@@ -1481,6 +1570,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       id: activeLayoutId,
       cols: WORKSPACE_GRID_COLS,
       rows: WORKSPACE_GRID_ROWS,
+      cellAspect: layoutCellAspect,
       tiles,
       slots,
     });
@@ -1500,6 +1590,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
               ...layout,
               cols: WORKSPACE_GRID_COLS,
               rows: WORKSPACE_GRID_ROWS,
+              cellAspect: layoutCellAspect,
               tiles,
               slots,
               cameras: tiles.map((tile) => tile.camera),
@@ -1532,7 +1623,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         saveLayoutTimeoutRef.current = null;
       }
     }, 450);
-  }, [activeLayout, activeLayoutId, hydratedLayoutId, liveLayouts, workspaceStarted, workspaceTiles]);
+  }, [activeLayout, activeLayoutId, hydratedLayoutId, layoutCellAspect, liveLayouts, workspaceStarted, workspaceTiles]);
 
   useEffect(() => {
     const handleAddCamera = (event) => {
@@ -1641,6 +1732,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       name,
       cols: WORKSPACE_GRID_COLS,
       rows: WORKSPACE_GRID_ROWS,
+      cellAspect: layoutCellAspect,
       tiles,
       slots,
       cameras: tiles.map((tile) => tile.camera),
@@ -1657,11 +1749,12 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       id: savedLayout.id,
       cols: WORKSPACE_GRID_COLS,
       rows: WORKSPACE_GRID_ROWS,
+      cellAspect: layoutCellAspect,
       tiles,
       slots,
     });
     return savedLayout;
-  }, [liveLayouts, saveLiveLayouts, workspaceTiles]);
+  }, [layoutCellAspect, liveLayouts, saveLiveLayouts, workspaceTiles]);
 
   const saveCurrentWorkspaceLayout = useCallback(async () => {
     if (!activeLayoutId || !activeLayout) {
@@ -1680,6 +1773,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
             ...layout,
             cols: WORKSPACE_GRID_COLS,
             rows: WORKSPACE_GRID_ROWS,
+            cellAspect: layoutCellAspect,
             tiles,
             slots,
             cameras: tiles.map((tile) => tile.camera),
@@ -1692,12 +1786,13 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       id: activeLayoutId,
       cols: WORKSPACE_GRID_COLS,
       rows: WORKSPACE_GRID_ROWS,
+      cellAspect: layoutCellAspect,
       tiles,
       slots,
     });
     showStatusMessage('Layout saved');
     setLayoutEditMode(false);
-  }, [activeLayout, activeLayoutId, liveLayouts, saveCurrentWorkspaceAsLayout, saveLiveLayouts, workspaceTiles]);
+  }, [activeLayout, activeLayoutId, layoutCellAspect, liveLayouts, saveCurrentWorkspaceAsLayout, saveLiveLayouts, workspaceTiles]);
 
   const renameCurrentWorkspaceLayout = useCallback(async () => {
     if (!activeLayoutId || !activeLayout) return;
@@ -1916,6 +2011,73 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const isWorkspaceMode = workspaceStarted;
   const orderedTotalPages = Math.ceil(orderedStreams.length / maxStreams);
   const visibleWorkspaceTileCount = singleCameraMode ? 1 : (isWorkspaceMode ? streamsToShow.length : 0);
+  workspaceTilesRef.current = workspaceTiles;
+
+  // Cell shape: chosen for the layout, or (auto) the shape of the first camera's picture
+  const firstCameraName = singleCameraMode
+    ? singleCameraView?.selectedCameraId
+    : isWorkspaceMode
+      ? [...workspaceTiles]
+        .filter((tile) => tile.type !== 'slot' && tile.cameraId)
+        .sort((a, b) => (a.y - b.y) || (a.x - b.x))[0]?.cameraId
+      : streamsToShow[0]?.name;
+  const firstCameraStream = firstCameraName ? streamByName.get(firstCameraName) : null;
+  const effectiveCellAspect =
+    parseAspectRatio(layoutCellAspect) ||
+    parseAspectRatio(cameraDisplay[firstCameraName]?.aspectRatio) ||
+    videoAspectByCamera[firstCameraName] ||
+    (firstCameraStream?.width > 0 && firstCameraStream?.height > 0 ? firstCameraStream.width / firstCameraStream.height : null) ||
+    16 / 9;
+  const cellArrangement = singleCameraMode
+    ? { cols: 1, rows: 1 }
+    : isWorkspaceMode
+      ? getTileArrangement(workspaceTiles)
+      : { cols, rows };
+
+  // Black space around the grid so every cell keeps the cell shape
+  useEffect(() => {
+    const grid = workspaceGridRef.current;
+    if (!grid) return undefined;
+    const applied = { x: 0, y: 0 };
+    const apply = (next) => {
+      if (Math.abs(next.x - applied.x) < 0.5 && Math.abs(next.y - applied.y) < 0.5) return;
+      applied.x = next.x;
+      applied.y = next.y;
+      grid.style.setProperty('--cell-pad-x', `${next.x.toFixed(1)}px`);
+      grid.style.setProperty('--cell-pad-y', `${next.y.toFixed(1)}px`);
+    };
+    grid.style.setProperty('--cell-pad-x', '0px');
+    grid.style.setProperty('--cell-pad-y', '0px');
+    if (isMobileViewport) return undefined;
+
+    const compute = () => {
+      const styles = window.getComputedStyle(grid);
+      const basePadX = (Number.parseFloat(styles.paddingLeft) || 0) - applied.x;
+      const basePadY = (Number.parseFloat(styles.paddingTop) || 0) - applied.y;
+      apply(computeCellPadding({
+        width: grid.clientWidth - (2 * basePadX),
+        height: grid.clientHeight - (2 * basePadY),
+        cols: cellArrangement.cols,
+        rows: cellArrangement.rows,
+        // Workspace tiles are spaced by margins (--tile-gap); the classic grid by CSS gap
+        gap: (Number.parseFloat(styles.getPropertyValue('--tile-gap-px')) || 0) + (Number.parseFloat(styles.columnGap) || 0),
+        aspect: effectiveCellAspect,
+      }));
+    };
+    compute();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(compute);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, [cellArrangement.cols, cellArrangement.rows, effectiveCellAspect, isMobileViewport, isWorkspaceMode, singleCameraMode, streamsToShow.length]);
+
+  // The unsaved workspace remembers its cell shape in this browser
+  useEffect(() => {
+    if (activeLayoutId) return;
+    try {
+      localStorage.setItem(LIVE_CELL_ASPECT_STORAGE_KEY, layoutCellAspect);
+    } catch {}
+  }, [activeLayoutId, layoutCellAspect]);
   const workspaceEmptySlotCount = isWorkspaceMode
     ? (singleCameraMode ? 0 : workspaceTiles.filter((tile) => tile.type === 'slot').length)
     : 0;
@@ -2249,6 +2411,26 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                 </button>
                 {workspaceMenuOpen && (
                   <div className="live-workspace-menu" role="menu">
+                    <div className="live-workspace-menu-group" role="group" aria-label="Cell shape">
+                      <span className="live-workspace-menu-label">Cell shape</span>
+                      <div className="live-workspace-menu-options">
+                        {CELL_ASPECT_OPTIONS.map((option) => (
+                          <button
+                            key={option}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={layoutCellAspect === option}
+                            data-cell-aspect={option}
+                            disabled={workspaceLocked}
+                            title={option === 'auto' ? 'Same shape as the first camera' : `${option} cells`}
+                            className={layoutCellAspect === option ? 'is-active' : ''}
+                            onClick={() => { setLayoutCellAspect(option); setWorkspaceMenuOpen(false); }}
+                          >
+                            {option === 'auto' ? 'Auto' : option}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                     {activeLayoutId && (
                       layoutEditMode ? (
                         <button type="button" role="menuitem" onClick={() => { setWorkspaceMenuOpen(false); setLayoutEditMode(false); }}>Done Editing</button>
@@ -2274,7 +2456,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         <div
           id="video-grid"
           ref={workspaceGridRef}
-          className={`video-container ${isWorkspaceMode ? 'is-workspace-grid' : gridHasEmptySlots ? 'is-partial-grid' : 'is-filled-grid'} ${visibleWorkspaceTileCount === 1 ? 'is-single-camera' : ''} ${singleCameraMode ? 'is-single-camera-view' : ''} ${isMobileViewport && isWorkspaceMode && !singleCameraMode ? 'is-mobile-workspace-stack' : ''}`}
+          className={`video-container ${isWorkspaceMode ? 'is-workspace-grid' : gridHasEmptySlots ? 'is-partial-grid' : 'is-filled-grid'} ${visibleWorkspaceTileCount === 1 ? 'is-single-camera' : ''} ${singleCameraMode ? 'is-single-camera-view' : ''} ${isMobileViewport && isWorkspaceMode && !singleCameraMode ? 'is-mobile-workspace-stack' : ''} ${movingTileId ? 'is-moving-tile' : ''}`}
           style={{ '--grid-cols': workspaceGridCols, '--grid-rows': workspaceGridRows }}
           onDragOver={(event) => {
             if (reorderMode || workspaceLocked) return;
@@ -2363,7 +2545,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                   return (
                     <div
                       key={tileInstanceId}
-                      className={`live-workspace-slot ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''}`}
+                      className={`live-workspace-slot ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
                       style={{
                         gridColumn: `${Math.min(workspaceGridCols, workspaceTile.x + 1)} / span ${Math.max(1, Math.min(workspaceGridCols - workspaceTile.x, workspaceTile.w || DEFAULT_WORKSPACE_TILE_W))}`,
                         gridRow: `${Math.min(workspaceGridRows, workspaceTile.y + 1)} / span ${Math.max(1, Math.min(workspaceGridRows - workspaceTile.y, workspaceTile.h || DEFAULT_WORKSPACE_TILE_H))}`,
@@ -2412,7 +2594,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                 return (
                   <div
                     key={tileInstanceId || stream.name}
-                    className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''}`}
+                    className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
                     style={{
                       position: 'relative',
                       ...(isSingleCameraActiveTile ? {
@@ -2482,6 +2664,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                       showControls={showControls}
                       globalShowDetections={showDetections}
                       isPageFullscreen={isFullscreen}
+                      forcedAspectRatio={cameraDisplay[stream.name]?.aspectRatio || 'auto'}
+                      onVideoDimensions={handleVideoDimensions}
                     />
                   </div>
                 );
