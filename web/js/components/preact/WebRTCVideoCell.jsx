@@ -48,6 +48,8 @@ const OFFER_RETRY_JITTER_MS = 250;
 const OFFER_FAILURE_REFRESH_DELAY_MS = 1200;
 const WEBRTC_OFFER_TIMEOUT_MS = 15000;
 const FULLSCREEN_ARROW_SEEK_SECONDS = 10;
+// A recording that ends this close to now is the newest one: after it comes live
+const FULLSCREEN_CAUGHT_UP_TO_LIVE_SECONDS = 180;
 const FULLSCREEN_SEEK_SETTLE_TOLERANCE_SECONDS = 1.5;
 const FULLSCREEN_SEGMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const FULLSCREEN_PLAYBACK_WARMUP_TTL_MS = 20 * 1000;
@@ -458,6 +460,50 @@ export function WebRTCVideoCell({
   const [fullscreenPlayback, setFullscreenPlayback] = useState(null);
   const [fullscreenPlaybackTimestamp, setFullscreenPlaybackTimestamp] = useState(null);
   const [fullscreenPlaybackSpeed, setFullscreenPlaybackSpeed] = useState(1);
+  // Pause state shown on the fullscreen timeline: the recording player's, or the live view's
+  const [isFullscreenPlaybackPaused, setIsFullscreenPlaybackPaused] = useState(false);
+  const [isLivePaused, setIsLivePaused] = useState(false);
+  // Set when the user paused the recording, so autoplay hooks do not resume it
+  const fullscreenUserPausedRef = useRef(false);
+  const fullscreenTogglePauseRef = useRef(null);
+
+  function resumeLiveVideo() {
+    const liveVideo = videoRef.current;
+    if (liveVideo && liveVideo.paused) {
+      liveVideo.play().catch(() => {});
+    }
+    setIsLivePaused(false);
+  }
+
+  // Timeline pause/play button and Space key: pause or resume what is on screen
+  const handleFullscreenTogglePause = () => {
+    if (fullscreenPlayback) {
+      const playbackVideo = playbackVideoRef.current;
+      if (!playbackVideo) return;
+      if (playbackVideo.paused) {
+        fullscreenUserPausedRef.current = false;
+        applyFullscreenPlaybackSpeed(playbackVideo, fullscreenPlaybackSpeed);
+        playbackVideo.play().catch(() => {});
+      } else {
+        fullscreenUserPausedRef.current = true;
+        playbackVideo.pause();
+      }
+      return;
+    }
+
+    const liveVideo = videoRef.current;
+    if (!liveVideo) return;
+    if (isLivePaused) {
+      resumeLiveVideo();
+    } else {
+      liveVideo.pause();
+      setIsLivePaused(true);
+    }
+  };
+  fullscreenTogglePauseRef.current = handleFullscreenTogglePause;
+  const fullscreenPlaybackState = fullscreenPlayback
+    ? (isFullscreenPlaybackPaused ? 'paused' : 'playing')
+    : (isLivePaused ? 'live-paused' : 'live');
   const [fullscreenPlaybackCoverFrame, setFullscreenPlaybackCoverFrame] = useState(null);
   const [isFullscreenPlaybackFrameReady, setIsFullscreenPlaybackFrameReady] = useState(false);
 
@@ -531,6 +577,8 @@ export function WebRTCVideoCell({
   const showFullStreamControls = !isTimelineFullscreenControls;
 
   const handleFullscreenPreviewSelect = (sample) => {
+    // Picking a time on the timeline plays from there
+    fullscreenUserPausedRef.current = false;
     if (!sample) {
       return;
     }
@@ -612,6 +660,9 @@ export function WebRTCVideoCell({
     setFullscreenPlayback(null);
     setFullscreenPlaybackTimestamp(null);
     setIsFullscreenPlaybackFrameReady(false);
+    resumeLiveVideo();
+    fullscreenUserPausedRef.current = false;
+    setIsFullscreenPlaybackPaused(false);
     fullscreenPlaybackTimestampRef.current = null;
     fullscreenPlaybackSeekTargetRef.current = null;
     fullscreenPlaybackCoverRequestRef.current += 1;
@@ -650,19 +701,27 @@ export function WebRTCVideoCell({
 
     const requestId = fullscreenPlaybackRequestRef.current + 1;
     fullscreenPlaybackRequestRef.current = requestId;
+    // Continue with the next recording, skipping over any gap
     resolveFullscreenPlaybackSample(segmentEnd + 1, {
-      mode: 'forward',
-      maxForwardGapSeconds: 5
+      mode: 'forward'
     }).then((sample) => {
       if (requestId !== fullscreenPlaybackRequestRef.current) {
         return;
       }
 
-      if (!sample || sample.segmentId === fullscreenPlayback.segmentId) {
+      if (sample && sample.segmentId !== fullscreenPlayback.segmentId) {
+        handleFullscreenPreviewSelect(sample);
         return;
       }
 
-      handleFullscreenPreviewSelect(sample);
+      // Played up to the newest recording: carry on with live instead of
+      // sitting on the last frame
+      if (segmentEnd >= Math.floor(Date.now() / 1000) - FULLSCREEN_CAUGHT_UP_TO_LIVE_SECONDS) {
+        handleReturnToLive();
+        return;
+      }
+      setIsFullscreenPlaybackPaused(true);
+      showStatusMessage('End of recordings for this camera', 'info', 3000);
     });
   };
 
@@ -748,6 +807,10 @@ export function WebRTCVideoCell({
       setFullscreenPlaybackCoverFrame(null);
       setIsFullscreenPlaybackFrameReady(false);
       cleanupFullscreenNextPlayback();
+      // Leaving fullscreen always shows the live view running again
+      resumeLiveVideo();
+      fullscreenUserPausedRef.current = false;
+      setIsFullscreenPlaybackPaused(false);
     }
   }, [cleanupFullscreenNextPlayback, isFullscreenCell]);
 
@@ -1105,7 +1168,8 @@ export function WebRTCVideoCell({
         return;
       }
 
-      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+      const isSpace = event.key === ' ' || event.code === 'Space';
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && !isSpace) {
         return;
       }
 
@@ -1113,9 +1177,18 @@ export function WebRTCVideoCell({
       if (fullscreenElement !== cellRef.current) {
         return;
       }
+      // Leave typing in the date field alone
+      if (event.target instanceof HTMLElement && event.target.closest('input, select, textarea')) {
+        return;
+      }
 
       event.preventDefault();
       event.stopPropagation();
+
+      if (isSpace) {
+        fullscreenTogglePauseRef.current?.();
+        return;
+      }
 
       const directionSeconds = event.key === 'ArrowLeft' ? -FULLSCREEN_ARROW_SEEK_SECONDS : FULLSCREEN_ARROW_SEEK_SECONDS;
       const playbackVideo = playbackVideoRef.current;
@@ -1146,8 +1219,33 @@ export function WebRTCVideoCell({
           return;
         }
 
-        if (!sample) {
+        // Going back from live into the minute still being recorded: play the
+        // end of the newest recording instead of staying on live
+        if (sample && directionSeconds < 0 && targetTimestamp > Number(sample.segmentEndTimestamp)) {
+          const newestEnd = Number(sample.segmentEndTimestamp);
+          const backTarget = Math.max(Number(sample.segmentStartTimestamp) || 0, newestEnd - FULLSCREEN_ARROW_SEEK_SECONDS);
+          resolveFullscreenPlaybackSample(backTarget).then((backSample) => {
+            if (requestId !== fullscreenTimelineSeekRequestRef.current || !backSample) return;
+            handleFullscreenPreviewSelect(backSample);
+          });
+          return;
+        }
+        // Past the newest recording is the part still being recorded: that is live
+        const isAfterNewestRecording = sample &&
+          targetTimestamp > Number(sample.segmentEndTimestamp) &&
+          targetTimestamp >= Math.floor(Date.now() / 1000) - FULLSCREEN_CAUGHT_UP_TO_LIVE_SECONDS;
+        if (!sample || isAfterNewestRecording) {
           fullscreenPlaybackSeekTargetRef.current = null;
+          if (isAfterNewestRecording || targetTimestamp >= Math.floor(Date.now() / 1000) - 5) {
+            // Nothing recorded yet at the live edge: show live
+            handleReturnToLive();
+            return;
+          }
+          // Keep the cursor on what is actually playing
+          const currentTimestamp = fullscreenPlayback ? baseTimestamp : null;
+          setFullscreenPlaybackTimestamp(currentTimestamp);
+          fullscreenPlaybackTimestampRef.current = currentTimestamp;
+          showStatusMessage(`No recording at ${new Date(targetTimestamp * 1000).toLocaleTimeString()}`, 'warning', 3000);
           return;
         }
 
@@ -2272,6 +2370,11 @@ export function WebRTCVideoCell({
             src={fullscreenPlayback.playbackUrl}
             poster={fullscreenPlaybackCoverFrame || fullscreenPlayback.thumbUrl || undefined}
             onEnded={handleFullscreenPlaybackEnded}
+            onPlay={() => setIsFullscreenPlaybackPaused(false)}
+            onPause={(event) => {
+              // Reaching the end of a recording is not a pause: the next one follows
+              if (!event.currentTarget.ended) setIsFullscreenPlaybackPaused(true);
+            }}
             onTimeUpdate={handleFullscreenPlaybackTimeUpdate}
             onSeeked={handleFullscreenPlaybackSeeked}
             onLoadedMetadata={() => {
@@ -2285,6 +2388,7 @@ export function WebRTCVideoCell({
               if (video) {
                 applyFullscreenPlaybackSpeed(video, fullscreenPlaybackSpeed);
                 requestFullscreenPlaybackCoverRelease(video);
+                if (fullscreenUserPausedRef.current) return;
                 video.play().catch((error) => {
                   console.debug('Fullscreen playback canplay did not resume automatically', error);
                 });
@@ -2691,6 +2795,8 @@ export function WebRTCVideoCell({
           onPlaybackSpeedChange={setFullscreenPlaybackSpeed}
           onPreviewSelect={handleFullscreenPreviewSelect}
           onReturnToLive={handleReturnToLive}
+          playbackState={fullscreenPlaybackState}
+          onTogglePause={handleFullscreenTogglePause}
         />
       )}
 

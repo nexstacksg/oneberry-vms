@@ -902,7 +902,11 @@ bool go2rtc_process_generate_config(const char *config_path, int api_port) {
     fprintf(config_file, "  level: debug\n\n");  // Use debug level for more verbose logging
 
     fprintf(config_file, "ffmpeg:\n");
-    fprintf(config_file, "  h264: \"-codec:v libx264 -g:v 30 -preset:v superfast\"\n");
+    // Used for on-demand conversions that browsers watch over WebRTC: no
+    // B-frames (zerolatency) and 4:2:0 colour, which WebRTC decoders need.
+    // B-frames made converted cameras play at a couple of frames per second.
+    fprintf(config_file, "  h264: \"-codec:v libx264 -g:v 30 -preset:v superfast -tune:v zerolatency "
+                         "-profile:v high -level:v 4.1 -pix_fmt:v yuv420p\"\n");
     fprintf(config_file, "  h265: \"-codec:v libx265 -g:v 30 -preset:v superfast\"\n");
 
     // Streams section (will be populated dynamically)

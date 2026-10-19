@@ -12,6 +12,7 @@ import { useQuery } from '../../query-client.js';
 import { useI18n } from '../../i18n.js';
 import { currentDateInputValue, getLocalDayIsoRange, shiftDateInputValue } from '../../utils/date-utils.js';
 import { forceNavigation } from '../../utils/navigation-utils.js';
+import { showStatusMessage } from './ToastContainer.jsx';
 import { formatUtils } from './recordings/formatUtils.js';
 import { TimelineBarBody } from './timeline/TimelineBarBody.jsx';
 import { TimelineTrack } from './timeline/TimelineTrack.jsx';
@@ -80,6 +81,10 @@ function stripHours(hours) {
 const MIN_FULLSCREEN_TIMELINE_VIEW_HOURS = 1 / 3600;
 const PLAYBACK_SPEEDS = [0.25, 0.5, 1, 1.5, 2, 4];
 const SEEK_SETTLE_TOLERANCE_SECONDS = 1.5;
+// Seeking this close to now plays live, since it is not recorded yet
+const LIVE_EDGE_SECONDS = 5;
+// How much of the newest recording "back" plays when live is newer than any recording
+const BACK_FROM_LIVE_SECONDS = 10;
 
 function formatDurationLabel(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) {
@@ -146,6 +151,8 @@ function MiniChevron({ expanded }) {
  * @param {number|null} [props.playbackTimestamp]
  * @param {Function} [props.onPreviewSelect]
  * @param {Function} [props.onReturnToLive]
+ * @param {'live'|'live-paused'|'playing'|'paused'} [props.playbackState='live'] What the player is actually doing
+ * @param {Function} [props.onTogglePause] Pause or resume the live view or the recording
  * @returns {JSX.Element|null}
  */
 export function FullscreenTimelineOverlay({
@@ -156,7 +163,9 @@ export function FullscreenTimelineOverlay({
   playbackSpeed = 1,
   onPlaybackSpeedChange,
   onPreviewSelect,
-  onReturnToLive
+  onReturnToLive,
+  playbackState = 'live',
+  onTogglePause
 }) {
   const { t } = useI18n();
   const [selectedDate, setSelectedDate] = useState(() => currentDateInputValue());
@@ -168,6 +177,8 @@ export function FullscreenTimelineOverlay({
   const [endHour, setEndHour] = useState(() => getTimelineDayLengthHours(selectedDate));
   const [scrubTimestamp, setScrubTimestamp] = useState(null);
   const [pendingSeekTimestamp, setPendingSeekTimestamp] = useState(null);
+  // A day picked in the date controls is played once that day's recordings load
+  const [pendingDaySeek, setPendingDaySeek] = useState(null);
   const rootRef = useRef(null);
   const trackRef = useRef(null);
   const scrubStateRef = useRef({
@@ -289,7 +300,9 @@ export function FullscreenTimelineOverlay({
     setIsFollowingLive(false);
 
     if (nextBounds) {
-      setCursorTimestamp(Math.round(nextBounds.startTimestamp + (nextHour * 3600)));
+      const nextTimestamp = Math.round(nextBounds.startTimestamp + (nextHour * 3600));
+      setCursorTimestamp(nextTimestamp);
+      setPendingDaySeek({ date: safeNextDate, timestamp: nextTimestamp });
     }
   };
 
@@ -382,17 +395,41 @@ export function FullscreenTimelineOverlay({
 
   const seekToTimestamp = (timestamp, event = null) => {
     const safeTimestamp = clampTimestampToSelectableRange(timestamp);
+    const nowTimestamp = Math.floor(Date.now() / 1000);
+    // Today, anything after the newest finished recording is still being
+    // recorded, so the closest thing to it is live
+    const newestEnd = segments.length ? Number(segments[segments.length - 1].end_timestamp) : null;
+    const isAfterNewestRecording = selectedDate >= currentDateInputValue() &&
+      Number.isFinite(newestEnd) && safeTimestamp > newestEnd;
+    if (safeTimestamp >= nowTimestamp - LIVE_EDGE_SECONDS || isAfterNewestRecording) {
+      handleLiveButton(event);
+      return true;
+    }
+
     const sample = resolvePlaybackSampleAtTimestamp(safeTimestamp);
     if (sample) {
       handlePreviewSelect(sample, event);
       return true;
     }
 
-    setCursorTimestamp(safeTimestamp);
-    setPendingSeekTimestamp(null);
-    setIsFollowingLive(false);
+    // Nothing recorded there: keep playing what is on screen, and say why
+    showStatusMessage(`No recording at ${formatClockLabel(safeTimestamp)}`, 'warning', 3000);
     return false;
   };
+
+  useEffect(() => {
+    // The handlers used below are declared after the hidden-overlay early return
+    if (!isVisible || !pendingDaySeek || pendingDaySeek.date !== selectedDate || isLoading || !timelineData) {
+      return;
+    }
+    setPendingDaySeek(null);
+    // Play the same time of day; if nothing was recorded then, the day's first recording
+    if (!resolvePlaybackSampleAtTimestamp(pendingDaySeek.timestamp) && segments.length > 0) {
+      seekToTimestamp(Number(segments[0].start_timestamp));
+      return;
+    }
+    seekToTimestamp(pendingDaySeek.timestamp);
+  }, [isVisible, pendingDaySeek, selectedDate, isLoading, timelineData]);
 
   useEffect(() => {
     if (!isVisible || !streamName) {
@@ -416,7 +453,7 @@ export function FullscreenTimelineOverlay({
   }, [isFollowingLive, isVisible, streamName]);
 
   useEffect(() => {
-    if (!isVisible || !streamName || !Number.isFinite(playbackTimestamp)) {
+    if (!isVisible || !streamName || !Number.isFinite(playbackTimestamp) || pendingDaySeek) {
       return;
     }
 
@@ -433,7 +470,25 @@ export function FullscreenTimelineOverlay({
       setPendingSeekTimestamp(null);
     }
     setIsFollowingLive(false);
-  }, [isVisible, pendingSeekTimestamp, playbackTimestamp, selectedDate, streamName]);
+  }, [isVisible, pendingDaySeek, pendingSeekTimestamp, playbackTimestamp, selectedDate, streamName]);
+
+  // Back on live from a recording (Live button, arrow keys, seeking to now): follow live again
+  const previousPlaybackStateRef = useRef(playbackState);
+  useEffect(() => {
+    const previous = previousPlaybackStateRef.current;
+    previousPlaybackStateRef.current = playbackState;
+    if (!isVisible || playbackState !== 'live' || (previous !== 'playing' && previous !== 'paused')) {
+      return;
+    }
+    const today = currentDateInputValue();
+    setSelectedDate(today);
+    setStartHour(0);
+    setEndHour(getTimelineDayLengthHours(today));
+    setCursorTimestamp(Math.floor(Date.now() / 1000));
+    setPendingSeekTimestamp(null);
+    setPendingDaySeek(null);
+    setIsFollowingLive(true);
+  }, [isVisible, playbackState]);
 
   useEffect(() => {
     if (!isVisible || !streamName) {
@@ -474,7 +529,6 @@ export function FullscreenTimelineOverlay({
     const nextRange = zoomTimelineRange(startHour, endHour, 0.5, anchorHour, dayLengthHours, MIN_FULLSCREEN_TIMELINE_VIEW_HOURS);
     setStartHour(nextRange.startHour);
     setEndHour(nextRange.endHour);
-    setIsFollowingLive(false);
   };
 
   const zoomOut = () => {
@@ -483,7 +537,6 @@ export function FullscreenTimelineOverlay({
     const nextRange = zoomTimelineRange(startHour, endHour, 2, anchorHour, dayLengthHours, MIN_FULLSCREEN_TIMELINE_VIEW_HOURS);
     setStartHour(nextRange.startHour);
     setEndHour(nextRange.endHour);
-    setIsFollowingLive(false);
   };
 
   const jumpToLive = () => {
@@ -505,12 +558,22 @@ export function FullscreenTimelineOverlay({
       : Number.isFinite(cursorTimestamp)
         ? cursorTimestamp
         : Math.floor(Date.now() / 1000);
-    const next = clampTimestampToSelectableRange(Math.max(current + seconds, 0));
+    let next = clampTimestampToSelectableRange(Math.max(current + seconds, 0));
+    // Going back from live into the minute still being recorded: play the
+    // end of the newest recording rather than staying on live
+    const newestEnd = segments.length ? Number(segments[segments.length - 1].end_timestamp) : null;
+    if (seconds < 0 && Number.isFinite(newestEnd) && next > newestEnd) {
+      next = newestEnd - Math.min(Math.abs(seconds), BACK_FROM_LIVE_SECONDS);
+    }
     seekToTimestamp(next);
-    setIsFollowingLive(false);
   };
 
   const handlePlayPauseButton = (event) => {
+    if (typeof onTogglePause === 'function') {
+      onTogglePause(event);
+      return;
+    }
+
     if (isFollowingLive) {
       setIsFollowingLive(false);
       return;
@@ -616,7 +679,6 @@ export function FullscreenTimelineOverlay({
     const nextRange = zoomTimelineRange(startHour, endHour, zoomFactor, anchorHour, dayLengthHours, MIN_FULLSCREEN_TIMELINE_VIEW_HOURS);
     setStartHour(nextRange.startHour);
     setEndHour(nextRange.endHour);
-    setIsFollowingLive(false);
   };
 
   const handlePreviewSelect = (sample, event) => {
@@ -647,6 +709,15 @@ export function FullscreenTimelineOverlay({
 
     jumpToLive();
   };
+
+  const isPlayerRunning = playbackState === 'live' || playbackState === 'playing';
+  const isRecordingPlayback = playbackState === 'playing' || playbackState === 'paused';
+  const statusLabel = {
+    live: 'Live',
+    'live-paused': 'Live paused',
+    playing: 'Playing',
+    paused: 'Paused'
+  }[playbackState] || 'Live';
 
   const currentTimeLabel = formatClockLabel(clockNow);
   const fullDateLabel = formatOverlayDate(selectedDate);
@@ -735,9 +806,10 @@ export function FullscreenTimelineOverlay({
                     <button
                       key={`fullscreen-speed-${speed}`}
                       type="button"
-                      title={`Playback speed ${speed}x`}
+                      title={isRecordingPlayback ? `Playback speed ${speed}x` : 'Playback speed applies to recordings'}
+                      disabled={!isRecordingPlayback}
                       onClick={() => onPlaybackSpeedChange?.(speed)}
-                      className={`min-w-[30px] rounded px-1 font-semibold tabular-nums transition-colors ${isDocked ? 'h-5 text-[8px]' : 'h-6 text-[10px]'} ${
+                      className={`min-w-[30px] rounded px-1 font-semibold tabular-nums transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${isDocked ? 'h-5 text-[8px]' : 'h-6 text-[10px]'} ${
                         speed === playbackSpeed
                           ? 'bg-sky-400 text-black'
                           : 'text-white/65 hover:bg-white/10 hover:text-white'
@@ -760,11 +832,11 @@ export function FullscreenTimelineOverlay({
                     </svg>
                   </IconButton>
                   <IconButton
-                    title={isFollowingLive ? t('timeline.pause') : t('timeline.playFromCurrentPosition')}
-                    active={isFollowingLive}
+                    title={isPlayerRunning ? t('timeline.pause') : 'Play'}
+                    active={isPlayerRunning}
                     onClick={handlePlayPauseButton}
                   >
-                    {isFollowingLive ? (
+                    {isPlayerRunning ? (
                       <svg xmlns="http://www.w3.org/2000/svg" className={isDocked ? 'h-3 w-3' : 'h-3.5 w-3.5'} viewBox="0 0 24 24" fill="currentColor">
                         <rect x="6" y="5" width="4" height="14" rx="1" />
                         <rect x="14" y="5" width="4" height="14" rx="1" />
@@ -818,7 +890,7 @@ export function FullscreenTimelineOverlay({
 
                 <div className={`hidden min-[700px]:flex items-center gap-1 rounded-full border border-sky-400/20 bg-sky-400/10 px-2 font-semibold uppercase tracking-[0.22em] text-sky-200 ${isDocked ? 'py-0 text-[8px]' : 'py-1 text-[10px]'}`}>
                   <span className={isDocked ? 'h-1 w-1 rounded-full bg-sky-300 shadow-[0_0_10px_rgba(125,211,252,0.6)]' : 'h-2 w-2 rounded-full bg-sky-300 shadow-[0_0_10px_rgba(125,211,252,0.6)]'} />
-                  {isFollowingLive ? 'SYNC' : 'PAUSED'}
+                  {statusLabel}
                 </div>
               </div>
             </div>
@@ -874,7 +946,7 @@ export function FullscreenTimelineOverlay({
                     <div className={`flex items-center justify-end gap-1.5 px-1 uppercase tracking-[0.22em] text-white/35 ${isDocked ? 'text-[8px]' : 'text-[10px]'}`}>
                       <span className="rounded-full border border-white/10 bg-white/5 px-1.5 py-0.5 text-white/65">Click to seek</span>
                       <span className="rounded-full border border-white/10 bg-white/5 px-1.5 py-0.5 text-white/65">
-                        {isFollowingLive ? 'Live sync' : 'Paused'}
+                        {statusLabel}
                       </span>
                     </div>
                   )}
