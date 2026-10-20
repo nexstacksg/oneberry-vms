@@ -4,6 +4,7 @@
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'preact/hooks';
+import { pickLiveLayoutExtras, pickTileQuality } from '../../utils/live-layout-extras.js';
 import { Fragment } from 'preact';
 import { createPortal, memo } from 'preact/compat';
 import {VERSION} from '../../version.js';
@@ -274,11 +275,14 @@ const normalizeLiveLayouts = (data = {}) => ({
               y: Number.isFinite(Number(tile?.y)) ? Math.max(0, Math.floor(Number(tile.y))) : 0,
               w: Number.isFinite(Number(tile?.w)) ? Math.max(1, Math.floor(Number(tile.w))) : 1,
               h: Number.isFinite(Number(tile?.h)) ? Math.max(1, Math.floor(Number(tile.h))) : 1,
+              ...pickTileQuality(tile),
             };
           })
           .filter(Boolean);
 
         return {
+          // Keep slots, cell shape, lock, sharing and background set in Live View
+          ...pickLiveLayoutExtras(layout),
           id: String(layout.id),
           userId: layout.userId ?? layout.ownerUserId ?? layout.owner_user_id,
           name: String(layout.name).trim(),

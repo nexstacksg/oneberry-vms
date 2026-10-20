@@ -118,6 +118,9 @@ int register_all_libuv_handlers(http_server_handle_t server) {
     http_server_register_handler(server, "/api/settings", "POST", handle_post_settings);
     http_server_register_handler(server, "/api/locations", "GET", handle_get_locations);
     http_server_register_handler(server, "/api/locations", "PUT", handle_put_locations);
+    http_server_register_handler(server, "/api/live-layouts/#/background", "GET", handle_get_live_layout_background);
+    http_server_register_handler(server, "/api/live-layouts/#/background", "POST", handle_post_live_layout_background);
+    http_server_register_handler(server, "/api/live-layouts/#/background", "DELETE", handle_delete_live_layout_background);
     http_server_register_handler(server, "/api/live-layouts", "GET", handle_get_live_layouts);
     http_server_register_handler(server, "/api/live-layouts", "PUT", handle_put_live_layouts);
     http_server_register_handler(server, "/api/camera-folders", "GET", handle_get_camera_folders);

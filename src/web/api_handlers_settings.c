@@ -7,6 +7,8 @@
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <syslog.h>
 #include <pthread.h>
 #include <cjson/cJSON.h>
@@ -336,6 +338,61 @@ static int64_t get_legacy_live_layout_owner_user_id(const user_t *current_user) 
     return current_user ? current_user->id : 0;
 }
 
+#define LIVE_LAYOUT_SHARE_MAX 64
+
+static void live_layout_background_path(const char *layout_id, char *path, size_t size);
+
+// Users a layout is shared with (Nx Witness style: they see it read-only)
+static bool live_layout_shared_with(const cJSON *layout, int64_t user_id) {
+    const cJSON *item;
+    cJSON_ArrayForEach(item, cJSON_GetObjectItem(layout, "sharedWith")) {
+        if (cJSON_IsNumber(item) && (int64_t)item->valuedouble == user_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Copy sharing, lock and background settings of a layout into its normalized form
+static void add_live_layout_extras(cJSON *layout, const cJSON *input_layout, int64_t owner_user_id) {
+    if (cJSON_IsTrue(cJSON_GetObjectItem(input_layout, "locked"))) {
+        cJSON_AddBoolToObject(layout, "locked", true);
+    }
+
+    // Shared with: valid user ids, not the owner, each once
+    cJSON *shared = cJSON_CreateArray();
+    const cJSON *item;
+    cJSON_ArrayForEach(item, cJSON_GetObjectItem(input_layout, "sharedWith")) {
+        if (!cJSON_IsNumber(item) || cJSON_GetArraySize(shared) >= LIVE_LAYOUT_SHARE_MAX) continue;
+        int64_t id = (int64_t)item->valuedouble;
+        bool duplicate = false;
+        const cJSON *existing;
+        cJSON_ArrayForEach(existing, shared) {
+            if ((int64_t)existing->valuedouble == id) duplicate = true;
+        }
+        if (id <= 0 || id == owner_user_id || duplicate) continue;
+        cJSON_AddItemToArray(shared, cJSON_CreateNumber((double)id));
+    }
+    if (cJSON_GetArraySize(shared) > 0) {
+        cJSON_AddItemToObject(layout, "sharedWith", shared);
+    } else {
+        cJSON_Delete(shared);
+    }
+
+    // Background image (map/plan) behind the cameras; the picture itself is a file
+    const cJSON *background = cJSON_GetObjectItem(input_layout, "background");
+    const cJSON *version = cJSON_GetObjectItem(background, "version");
+    if (cJSON_IsNumber(version) && version->valuedouble > 0) {
+        const cJSON *opacity = cJSON_GetObjectItem(background, "opacity");
+        double value = cJSON_IsNumber(opacity) ? opacity->valuedouble : 0.6;
+        if (value < 0.1) value = 0.1;
+        if (value > 1.0) value = 1.0;
+        cJSON *bg = cJSON_AddObjectToObject(layout, "background");
+        cJSON_AddNumberToObject(bg, "version", (double)(int64_t)version->valuedouble);
+        cJSON_AddNumberToObject(bg, "opacity", value);
+    }
+}
+
 static bool add_normalized_layout_tile(cJSON *tiles, cJSON *cameras, cJSON *allowed_cameras,
                                        const char *tile_id,
                                        const char *camera_name, int x, int y, int w, int h,
@@ -452,7 +509,8 @@ static cJSON *normalize_live_layouts_json(cJSON *input, const user_t *user, bool
             snprintf(error, error_size, "Forbidden: layout belongs to another user");
             return NULL;
         }
-        if (only_current_user && owner_user_id != user->id) {
+        bool shared_with_me = owner_user_id != user->id && live_layout_shared_with(input_layout, user->id);
+        if (only_current_user && owner_user_id != user->id && !shared_with_me) {
             continue;
         }
 
@@ -485,6 +543,16 @@ static cJSON *normalize_live_layouts_json(cJSON *input, const user_t *user, bool
         }
         cJSON_AddItemToObject(layout, "tiles", tiles);
         cJSON_AddItemToObject(layout, "cameras", cameras);
+        add_live_layout_extras(layout, input_layout, owner_user_id);
+        if (only_current_user && shared_with_me) {
+            // Shown read-only to the people it is shared with
+            cJSON_DeleteItemFromObject(layout, "sharedWith");
+            cJSON_AddBoolToObject(layout, "sharedWithMe", true);
+            user_t owner;
+            if (db_auth_get_user_by_id(owner_user_id, &owner) == 0) {
+                cJSON_AddStringToObject(layout, "ownerName", owner.username);
+            }
+        }
 
         cJSON *input_tiles = cJSON_GetObjectItem(input_layout, "tiles");
         if (input_tiles && !cJSON_IsArray(input_tiles)) {
@@ -775,6 +843,73 @@ void handle_put_locations(const http_request_t *req, http_response_t *res) {
     free(json);
 }
 
+// Layouts other people shared with this user come back read-only: ignore them
+static void drop_layouts_shared_with_user(cJSON *body, cJSON *stored, const user_t *user) {
+    cJSON *layouts = cJSON_GetObjectItem(body, "layouts");
+    cJSON *stored_layouts = cJSON_GetObjectItem(stored, "layouts");
+    for (int i = cJSON_GetArraySize(layouts) - 1; i >= 0; i--) {
+        cJSON *layout = cJSON_GetArrayItem(layouts, i);
+        cJSON *id_json = cJSON_GetObjectItem(layout, "id");
+        cJSON *existing = cJSON_IsString(id_json) ? find_live_layout_by_id(stored_layouts, id_json->valuestring) : NULL;
+        bool foreign_shared = existing && get_live_layout_user_id(existing) != user->id &&
+                              live_layout_shared_with(existing, user->id);
+        if (foreign_shared || cJSON_IsTrue(cJSON_GetObjectItem(layout, "sharedWithMe"))) {
+            cJSON_DeleteItemFromArray(layouts, i);
+        }
+    }
+}
+
+// What a lock protects: name, cell shape, background, tiles (not their resolution) and slots
+static char *live_layout_locked_content(const cJSON *layout) {
+    cJSON *content = cJSON_CreateObject();
+    const char *keys[] = { "name", "cellAspect", "background", "slots" };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        const cJSON *item = cJSON_GetObjectItem(layout, keys[i]);
+        if (item) cJSON_AddItemToObject(content, keys[i], cJSON_Duplicate(item, true));
+    }
+    cJSON *tiles = cJSON_AddArrayToObject(content, "tiles");
+    const cJSON *tile;
+    cJSON_ArrayForEach(tile, cJSON_GetObjectItem(layout, "tiles")) {
+        cJSON *copy = cJSON_Duplicate(tile, true);
+        cJSON_DeleteItemFromObject(copy, "quality");
+        cJSON_AddItemToArray(tiles, copy);
+    }
+    char *json = cJSON_PrintUnformatted(content);
+    cJSON_Delete(content);
+    return json;
+}
+
+// A locked layout cannot be changed or deleted until its owner unlocks it
+static bool check_locked_live_layouts(cJSON *stored, cJSON *submitted, const user_t *user,
+                                      char *error, size_t error_size) {
+    const cJSON *old_layout;
+    cJSON_ArrayForEach(old_layout, cJSON_GetObjectItem(stored, "layouts")) {
+        if (!cJSON_IsTrue(cJSON_GetObjectItem(old_layout, "locked"))) continue;
+        int64_t owner = get_live_layout_user_id((cJSON *)old_layout);
+        if (owner != user->id && !(owner == LIVE_LAYOUT_UNOWNED_USER_ID && user->role == USER_ROLE_ADMIN)) continue;
+
+        const char *id = cJSON_GetObjectItem(old_layout, "id")->valuestring;
+        const char *name = cJSON_GetObjectItem(old_layout, "name")->valuestring;
+        cJSON *new_layout = find_live_layout_by_id(cJSON_GetObjectItem(submitted, "layouts"), id);
+        if (!new_layout) {
+            snprintf(error, error_size, "Layout '%s' is locked. Unlock it before deleting it.", name);
+            return false;
+        }
+        if (!cJSON_IsTrue(cJSON_GetObjectItem(new_layout, "locked"))) continue;  // being unlocked
+
+        char *before = live_layout_locked_content(old_layout);
+        char *after = live_layout_locked_content(new_layout);
+        bool changed = !before || !after || strcmp(before, after) != 0;
+        free(before);
+        free(after);
+        if (changed) {
+            snprintf(error, error_size, "Layout '%s' is locked. Unlock it before changing it.", name);
+            return false;
+        }
+    }
+    return true;
+}
+
 void handle_get_live_layouts(const http_request_t *req, http_response_t *res) {
     log_info("Handling GET /api/live-layouts request");
 
@@ -884,6 +1019,8 @@ void handle_put_live_layouts(const http_request_t *req, http_response_t *res) {
         return;
     }
 
+    drop_layouts_shared_with_user(body, normalized_stored, &user);
+
     if (!validate_live_layout_id_ownership(normalized_stored, body, &user, error, sizeof(error))) {
         cJSON_Delete(body);
         cJSON_Delete(normalized_stored);
@@ -899,6 +1036,25 @@ void handle_put_live_layouts(const http_request_t *req, http_response_t *res) {
     if (!normalized) {
         cJSON_Delete(normalized_stored);
         http_response_set_json_error(res, 400, error[0] ? error : "Invalid live layouts");
+        return;
+    }
+
+    // Background pictures of this user's layouts that are being deleted
+    char deleted_backgrounds[16][LIVE_LAYOUT_ID_MAX_LEN + 1];
+    int deleted_background_count = 0;
+    const cJSON *old_layout;
+    cJSON_ArrayForEach(old_layout, cJSON_GetObjectItem(normalized_stored, "layouts")) {
+        if (get_live_layout_user_id((cJSON *)old_layout) != user.id || !cJSON_GetObjectItem(old_layout, "background")) continue;
+        const char *old_id = cJSON_GetObjectItem(old_layout, "id")->valuestring;
+        if (!find_live_layout_by_id(cJSON_GetObjectItem(normalized, "layouts"), old_id) && deleted_background_count < 16) {
+            snprintf(deleted_backgrounds[deleted_background_count++], LIVE_LAYOUT_ID_MAX_LEN + 1, "%s", old_id);
+        }
+    }
+
+    if (!check_locked_live_layouts(normalized_stored, normalized, &user, error, sizeof(error))) {
+        cJSON_Delete(normalized_stored);
+        cJSON_Delete(normalized);
+        http_response_set_json_error(res, 409, error);
         return;
     }
 
@@ -930,7 +1086,22 @@ void handle_put_live_layouts(const http_request_t *req, http_response_t *res) {
         return;
     }
 
-    char *response_json = cJSON_PrintUnformatted(normalized);
+    for (int i = 0; i < deleted_background_count; i++) {
+        char background_path[MAX_PATH_LENGTH];
+        live_layout_background_path(deleted_backgrounds[i], background_path, sizeof(background_path));
+        unlink(background_path);
+    }
+
+    // Reply with what GET would now return: own layouts plus those shared with this user
+    cJSON *merged_view = cJSON_Parse(json);
+    cJSON *allowed_view = build_allowed_live_layout_cameras(&user);
+    cJSON *view = (merged_view && allowed_view)
+        ? normalize_live_layouts_json(merged_view, &user, true, false, allowed_view, error, sizeof(error))
+        : NULL;
+    cJSON_Delete(merged_view);
+    cJSON_Delete(allowed_view);
+    char *response_json = cJSON_PrintUnformatted(view ? view : normalized);
+    cJSON_Delete(view);
     cJSON_Delete(normalized);
     if (!response_json) {
         free(json);
@@ -2674,4 +2845,183 @@ void handle_post_settings(const http_request_t *req, http_response_t *res) {
     cJSON_Delete(success);
     
     log_info("Successfully handled POST /api/settings request");
+}
+
+/* ---------------------------------------------------------------------------
+ * Layout background image (Nx Witness style map/plan behind the cameras)
+ *
+ * GET    /api/live-layouts/<id>/background   the picture (owner, shared users, admins)
+ * POST   /api/live-layouts/<id>/background   raw JPEG/PNG/WebP body, at most 1 MB (owner)
+ * DELETE /api/live-layouts/<id>/background   remove it (owner)
+ * ------------------------------------------------------------------------ */
+
+#define LIVE_LAYOUT_BACKGROUND_MAX_BYTES (1024 * 1024)
+
+static bool get_layout_id_from_background_path(const http_request_t *req, char *layout_id, size_t size) {
+    char param[LIVE_LAYOUT_ID_MAX_LEN + 32] = {0};
+    if (http_request_extract_path_param(req, "/api/live-layouts/", param, sizeof(param)) != 0) return false;
+    char *slash = strchr(param, '/');
+    if (slash) *slash = '\0';
+    snprintf(layout_id, size, "%s", param);
+    return is_valid_layout_id(layout_id);
+}
+
+static void live_layout_background_path(const char *layout_id, char *path, size_t size) {
+    snprintf(path, size, "%s/layout-backgrounds/%s.img", g_config.storage_path, layout_id);
+}
+
+static cJSON *load_stored_live_layouts(void) {
+    char *layouts_json = calloc(1, LIVE_LAYOUTS_MAX_BYTES);
+    cJSON *stored = NULL;
+    if (layouts_json && db_get_system_setting(LIVE_LAYOUTS_SETTING_KEY, layouts_json, LIVE_LAYOUTS_MAX_BYTES) == 0 &&
+        layouts_json[0] != '\0') {
+        stored = cJSON_Parse(layouts_json);
+    }
+    free(layouts_json);
+    return stored;
+}
+
+static const char *sniff_image_type(const unsigned char *data, size_t len) {
+    if (len >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) return "image/jpeg";
+    if (len >= 8 && memcmp(data, "\x89PNG\r\n\x1a\n", 8) == 0) return "image/png";
+    if (len >= 12 && memcmp(data, "RIFF", 4) == 0 && memcmp(data + 8, "WEBP", 4) == 0) return "image/webp";
+    return NULL;
+}
+
+void handle_get_live_layout_background(const http_request_t *req, http_response_t *res) {
+    user_t user;
+    if (!httpd_check_viewer_access(req, &user)) {
+        http_response_set_json_error(res, 401, "Unauthorized");
+        return;
+    }
+    char layout_id[LIVE_LAYOUT_ID_MAX_LEN + 1];
+    if (!get_layout_id_from_background_path(req, layout_id, sizeof(layout_id))) {
+        http_response_set_json_error(res, 400, "Invalid layout id");
+        return;
+    }
+    cJSON *stored = load_stored_live_layouts();
+    cJSON *layout = stored ? find_live_layout_by_id(cJSON_GetObjectItem(stored, "layouts"), layout_id) : NULL;
+    bool allowed = layout && (get_live_layout_user_id(layout) == user.id || user.role == USER_ROLE_ADMIN ||
+                              live_layout_shared_with(layout, user.id));
+    cJSON_Delete(stored);
+    if (!allowed) {
+        http_response_set_json_error(res, 404, "Layout not found");
+        return;
+    }
+
+    char path[MAX_PATH_LENGTH];
+    live_layout_background_path(layout_id, path, sizeof(path));
+    FILE *file = fopen(path, "rb");
+    unsigned char head[16] = {0};
+    size_t head_len = file ? fread(head, 1, sizeof(head), file) : 0;
+    if (file) fclose(file);
+    const char *type = sniff_image_type(head, head_len);
+    if (!type) {
+        http_response_set_json_error(res, 404, "This layout has no background");
+        return;
+    }
+    if (http_serve_file(req, res, path, type, "Cache-Control: private, max-age=86400\r\n") != 0) {
+        http_response_set_json_error(res, 500, "Failed to send the background");
+    }
+}
+
+// Load layouts, find one the user owns; on failure sets the response and returns NULL
+static cJSON *load_owned_layout_for_background(const http_request_t *req, http_response_t *res, user_t *user,
+                                               char *layout_id, size_t id_size, cJSON **stored_out) {
+    if (!httpd_check_viewer_access(req, user)) {
+        http_response_set_json_error(res, 401, "Unauthorized");
+        return NULL;
+    }
+    if (!get_layout_id_from_background_path(req, layout_id, id_size)) {
+        http_response_set_json_error(res, 400, "Invalid layout id");
+        return NULL;
+    }
+    cJSON *stored = load_stored_live_layouts();
+    cJSON *layout = stored ? find_live_layout_by_id(cJSON_GetObjectItem(stored, "layouts"), layout_id) : NULL;
+    int64_t owner = layout ? get_live_layout_user_id(layout) : LIVE_LAYOUT_UNOWNED_USER_ID;
+    if (!layout || (owner != user->id && !(owner == LIVE_LAYOUT_UNOWNED_USER_ID && user->role == USER_ROLE_ADMIN))) {
+        cJSON_Delete(stored);
+        http_response_set_json_error(res, 404, "Layout not found");
+        return NULL;
+    }
+    if (cJSON_IsTrue(cJSON_GetObjectItem(layout, "locked"))) {
+        cJSON_Delete(stored);
+        http_response_set_json_error(res, 409, "This layout is locked. Unlock it before changing its background.");
+        return NULL;
+    }
+    *stored_out = stored;
+    return layout;
+}
+
+static void respond_with_layout_background(http_response_t *res, cJSON *stored, cJSON *layout) {
+    char *json = cJSON_PrintUnformatted(stored);
+    if (!json || db_set_system_setting(LIVE_LAYOUTS_SETTING_KEY, json) != 0) {
+        free(json);
+        http_response_set_json_error(res, 500, "Failed to save the layout");
+        return;
+    }
+    free(json);
+    cJSON *background = cJSON_GetObjectItem(layout, "background");
+    cJSON *reply = cJSON_CreateObject();
+    cJSON_AddItemToObject(reply, "background", background ? cJSON_Duplicate(background, true) : cJSON_CreateNull());
+    char *reply_json = cJSON_PrintUnformatted(reply);
+    cJSON_Delete(reply);
+    http_response_set_json(res, 200, reply_json ? reply_json : "{}");
+    free(reply_json);
+}
+
+void handle_post_live_layout_background(const http_request_t *req, http_response_t *res) {
+    user_t user;
+    char layout_id[LIVE_LAYOUT_ID_MAX_LEN + 1];
+    cJSON *stored = NULL;
+    cJSON *layout = load_owned_layout_for_background(req, res, &user, layout_id, sizeof(layout_id), &stored);
+    if (!layout) return;
+
+    if (!req->body || req->body_len == 0 || req->body_len > LIVE_LAYOUT_BACKGROUND_MAX_BYTES ||
+        !sniff_image_type(req->body, req->body_len)) {
+        cJSON_Delete(stored);
+        http_response_set_json_error(res, 400, "Send a JPEG, PNG or WebP picture of at most 1 MB");
+        return;
+    }
+
+    char dir[MAX_PATH_LENGTH];
+    snprintf(dir, sizeof(dir), "%s/layout-backgrounds", g_config.storage_path);
+    mkdir(dir, 0755);
+    char path[MAX_PATH_LENGTH];
+    live_layout_background_path(layout_id, path, sizeof(path));
+    FILE *file = fopen(path, "wb");
+    bool written = file && fwrite(req->body, 1, req->body_len, file) == req->body_len;
+    if (file) fclose(file);
+    if (!written) {
+        cJSON_Delete(stored);
+        http_response_set_json_error(res, 500, "Failed to store the background");
+        return;
+    }
+
+    cJSON *old_background = cJSON_GetObjectItem(layout, "background");
+    const cJSON *old_opacity = cJSON_GetObjectItem(old_background, "opacity");
+    double opacity = cJSON_IsNumber(old_opacity) ? old_opacity->valuedouble : 0.6;
+    cJSON_DeleteItemFromObject(layout, "background");
+    cJSON *background = cJSON_AddObjectToObject(layout, "background");
+    cJSON_AddNumberToObject(background, "version", (double)time(NULL));
+    cJSON_AddNumberToObject(background, "opacity", opacity);
+    log_info("Layout %s background updated by %s (%zu bytes)", layout_id, user.username, req->body_len);
+    respond_with_layout_background(res, stored, layout);
+    cJSON_Delete(stored);
+}
+
+void handle_delete_live_layout_background(const http_request_t *req, http_response_t *res) {
+    user_t user;
+    char layout_id[LIVE_LAYOUT_ID_MAX_LEN + 1];
+    cJSON *stored = NULL;
+    cJSON *layout = load_owned_layout_for_background(req, res, &user, layout_id, sizeof(layout_id), &stored);
+    if (!layout) return;
+
+    char path[MAX_PATH_LENGTH];
+    live_layout_background_path(layout_id, path, sizeof(path));
+    unlink(path);
+    cJSON_DeleteItemFromObject(layout, "background");
+    log_info("Layout %s background removed by %s", layout_id, user.username);
+    respond_with_layout_background(res, stored, layout);
+    cJSON_Delete(stored);
 }

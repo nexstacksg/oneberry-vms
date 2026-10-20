@@ -21,6 +21,8 @@ import { getAuthHeaders } from '../../utils/auth-utils.js';
 import { useI18n } from '../../i18n.js';
 
 import { normalizeItemQuality } from './useItemQuality.js';
+import { pickLiveLayoutExtras } from '../../utils/live-layout-extras.js';
+import { validateSession } from '../../utils/auth-utils.js';
 import {
   CELL_ASPECT_OPTIONS,
   computeCellPadding,
@@ -210,6 +212,8 @@ function normalizeLiveLayouts(data = {}) {
             }));
 
           return {
+            // Lock, sharing and background (slots and cell shape are set below)
+            ...pickLiveLayoutExtras(layout),
             id: String(layout.id),
             userId: layout.userId ?? layout.ownerUserId ?? layout.owner_user_id,
             name: String(layout.name).trim(),
@@ -577,6 +581,11 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       return {};
     }
   });
+  const [isAdminUser, setIsAdminUser] = useState(false);
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
+  const [shareUsers, setShareUsers] = useState([]);
+  const [shareSelection, setShareSelection] = useState([]);
+  const backgroundInputRef = useRef(null);
   // Tile being dragged, and the tile or empty slot it would swap with
   const [movingTileId, setMovingTileId] = useState('');
   const [tileDropTargetId, setTileDropTargetId] = useState('');
@@ -853,6 +862,14 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const layoutMaxItems = Math.max(1, Number(liveSettingsData?.live_layout_max_items) || 64);
   const layoutMaxItemsRef = useRef(layoutMaxItems);
   layoutMaxItemsRef.current = layoutMaxItems;
+  useEffect(() => {
+    let cancelled = false;
+    validateSession().then((session) => {
+      if (!cancelled) setIsAdminUser(session?.role === 'admin');
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
   const showLayoutFullMessage = () => showStatusMessage(
     `A layout can hold at most ${layoutMaxItemsRef.current} cameras. An admin can change this in Settings (Cameras per layout).`,
     'error',
@@ -1058,7 +1075,10 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       ? liveLayouts.layouts.find((layout) => layout.id === activeLayoutId) || null
       : null
   ), [activeLayoutId, liveLayouts]);
-  const workspaceLocked = singleCameraMode || (Boolean(activeLayoutId) && !layoutEditMode);
+  // Shared with me by someone else: read-only. Locked by its owner: no editing until unlocked.
+  const isSharedLayout = Boolean(activeLayout?.sharedWithMe);
+  const isLockedLayout = Boolean(activeLayout?.locked);
+  const workspaceLocked = singleCameraMode || (Boolean(activeLayoutId) && (!layoutEditMode || isSharedLayout || isLockedLayout));
 
   const captureCurrentLayoutState = useCallback(() => ({
     selectedLayoutId: activeLayoutId,
@@ -1621,6 +1641,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
 
   useEffect(() => {
     if (!activeLayoutId || !activeLayout || !workspaceStarted || hydratedLayoutId !== activeLayoutId) return;
+    if (activeLayout.sharedWithMe) return;
 
     const tiles = serializeWorkspaceTilesForSave(workspaceTiles);
     const slots = serializeWorkspaceSlotsForSave(workspaceTiles);
@@ -1881,6 +1902,108 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setLayoutEditMode(true);
     setWorkspaceAutoGrid(true);
   }, [activeLayout, activeLayoutId, liveLayouts, saveLiveLayouts]);
+
+  // Change settings of the open saved layout (lock, sharing, background) and save
+  const updateActiveLayout = useCallback(async (changes, message) => {
+    if (!activeLayoutId || !activeLayout || activeLayout.sharedWithMe) return false;
+    try {
+      await saveLiveLayouts({
+        layouts: liveLayouts.layouts.map((layout) => (
+          layout.id === activeLayoutId ? { ...layout, ...changes } : layout
+        )),
+      }, liveLayouts);
+      if (message) showStatusMessage(message);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [activeLayout, activeLayoutId, liveLayouts, saveLiveLayouts]);
+
+  const toggleActiveLayoutLock = useCallback(async () => {
+    if (!activeLayout) return;
+    const locked = !activeLayout.locked;
+    if (locked) {
+      // Save pending edits first, then lock what is on screen
+      if (layoutEditMode) await saveCurrentWorkspaceLayout();
+      setLayoutEditMode(false);
+    }
+    await updateActiveLayout({ locked }, locked ? 'Layout locked. Unlock it to make changes.' : 'Layout unlocked');
+  }, [activeLayout, layoutEditMode, saveCurrentWorkspaceLayout, updateActiveLayout]);
+
+  const openShareDialog = useCallback(async () => {
+    try {
+      const data = await fetchJSON('/api/auth/users', { headers: getAuthHeaders(), timeout: 10000, retries: 1 });
+      const ownerId = Number(activeLayout?.userId);
+      setShareUsers((data?.users || []).filter((user) => user.is_active !== false && Number(user.id) !== ownerId));
+      setShareSelection(Array.isArray(activeLayout?.sharedWith) ? activeLayout.sharedWith : []);
+      setShareDialogOpen(true);
+    } catch (error) {
+      showStatusMessage(error.message || 'Could not load users', 'error', 6000);
+    }
+  }, [activeLayout]);
+
+  const saveShareSelection = useCallback(async () => {
+    const ok = await updateActiveLayout(
+      { sharedWith: shareSelection },
+      shareSelection.length > 0 ? `Layout shared with ${shareSelection.length} user${shareSelection.length === 1 ? '' : 's'}` : 'Layout is no longer shared'
+    );
+    if (ok) setShareDialogOpen(false);
+  }, [shareSelection, updateActiveLayout]);
+
+  // Background picture (map or floor plan): shrunk in the browser to fit the 1 MB upload limit
+  const uploadLayoutBackground = useCallback(async (file) => {
+    if (!file || !activeLayoutId) return;
+    try {
+      const bitmap = await createImageBitmap(file);
+      const scale = Math.min(1, 1920 / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      let blob = null;
+      for (const quality of [0.85, 0.7, 0.55, 0.4]) {
+        blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+        if (blob && blob.size <= 1000 * 1000) break;
+      }
+      if (!blob || blob.size > 1000 * 1000) throw new Error('The picture is too large even after shrinking it');
+      const response = await fetch(`/api/live-layouts/${encodeURIComponent(activeLayoutId)}/background`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/jpeg', ...getAuthHeaders() },
+        body: blob,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data?.error || `Upload failed (${response.status})`);
+      queryClient.setQueryData(['live-layouts'], (previous) => normalizeLiveLayouts({
+        layouts: (previous?.layouts || []).map((layout) => (
+          layout.id === activeLayoutId ? { ...layout, background: data.background } : layout
+        )),
+      }));
+      showStatusMessage('Background set');
+    } catch (error) {
+      showStatusMessage(error.message || 'Could not set the background', 'error', 6000);
+    }
+  }, [activeLayoutId, queryClient]);
+
+  const removeLayoutBackground = useCallback(async () => {
+    if (!activeLayoutId) return;
+    const response = await fetch(`/api/live-layouts/${encodeURIComponent(activeLayoutId)}/background`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      showStatusMessage(data?.error || 'Could not remove the background', 'error', 6000);
+      return;
+    }
+    queryClient.setQueryData(['live-layouts'], (previous) => normalizeLiveLayouts({
+      layouts: (previous?.layouts || []).map((layout) => {
+        if (layout.id !== activeLayoutId) return layout;
+        const { background, ...rest } = layout;
+        return rest;
+      }),
+    }));
+    showStatusMessage('Background removed');
+  }, [activeLayoutId, queryClient]);
 
   const resetCurrentWorkspaceLayout = useCallback(() => {
     setWorkspaceTiles([]);
@@ -2489,12 +2612,68 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                         ))}
                       </div>
                     </div>
-                    {activeLayoutId && (
-                      layoutEditMode ? (
+                    {isSharedLayout && (
+                      <div className="live-workspace-menu-note" data-testid="layout-shared-note">
+                        Shared by {activeLayout?.ownerName || 'another user'} (view only). Use Save As to make your own copy.
+                      </div>
+                    )}
+                    {activeLayoutId && !isSharedLayout && (
+                      layoutEditMode && !isLockedLayout ? (
                         <button type="button" role="menuitem" onClick={() => { setWorkspaceMenuOpen(false); setLayoutEditMode(false); }}>Done Editing</button>
                       ) : (
-                        <button type="button" role="menuitem" onClick={() => { setWorkspaceMenuOpen(false); setLayoutEditMode(true); }}>Edit Layout</button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={isLockedLayout}
+                          title={isLockedLayout ? 'Unlock the layout to edit it' : undefined}
+                          onClick={() => { setWorkspaceMenuOpen(false); setLayoutEditMode(true); }}
+                        >
+                          Edit Layout
+                        </button>
                       )
+                    )}
+                    {activeLayoutId && !isSharedLayout && (
+                      <button type="button" role="menuitem" data-testid="layout-lock-toggle" onClick={() => { setWorkspaceMenuOpen(false); toggleActiveLayoutLock(); }}>
+                        {isLockedLayout ? 'Unlock Layout' : 'Lock Layout'}
+                      </button>
+                    )}
+                    {activeLayoutId && !isSharedLayout && isAdminUser && (
+                      <button type="button" role="menuitem" data-testid="layout-share" onClick={() => { setWorkspaceMenuOpen(false); openShareDialog(); }}>
+                        Share Layout…{activeLayout?.sharedWith?.length ? ` (${activeLayout.sharedWith.length})` : ''}
+                      </button>
+                    )}
+                    {activeLayoutId && !isSharedLayout && (
+                      <>
+                        <button type="button" role="menuitem" data-testid="layout-background-set" disabled={isLockedLayout} onClick={() => { setWorkspaceMenuOpen(false); backgroundInputRef.current?.click(); }}>
+                          {activeLayout?.background ? 'Change Background…' : 'Set Background…'}
+                        </button>
+                        {activeLayout?.background && (
+                          <div className="live-workspace-menu-group" role="group" aria-label="Background opacity">
+                            <span className="live-workspace-menu-label">Background</span>
+                            <div className="live-workspace-menu-options">
+                              {[0.3, 0.6, 1].map((opacity) => (
+                                <button
+                                  key={opacity}
+                                  type="button"
+                                  role="menuitemradio"
+                                  data-background-opacity={opacity}
+                                  aria-checked={Math.abs((activeLayout.background.opacity || 0.6) - opacity) < 0.01}
+                                  className={Math.abs((activeLayout.background.opacity || 0.6) - opacity) < 0.01 ? 'is-active' : ''}
+                                  disabled={isLockedLayout}
+                                  onClick={() => updateActiveLayout({ background: { ...activeLayout.background, opacity } })}
+                                >
+                                  {Math.round(opacity * 100)}%
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {activeLayout?.background && (
+                          <button type="button" role="menuitem" data-testid="layout-background-remove" disabled={isLockedLayout} onClick={() => { setWorkspaceMenuOpen(false); removeLayoutBackground(); }}>
+                            Remove Background
+                          </button>
+                        )}
+                      </>
                     )}
                     <button type="button" role="menuitem" disabled={workspaceLocked} onClick={() => { setWorkspaceMenuOpen(false); saveCurrentWorkspaceLayout(); }}>Save Layout</button>
                     <button type="button" role="menuitem" onClick={() => {
@@ -2502,8 +2681,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                       const name = window.prompt('Layout name', activeLayout?.name ? `${activeLayout.name} Copy` : '');
                       if (name) saveCurrentWorkspaceAsLayout(name);
                     }}>Save As</button>
-                    <button type="button" role="menuitem" disabled={!activeLayoutId} onClick={() => { setWorkspaceMenuOpen(false); renameCurrentWorkspaceLayout(); }}>Rename Layout</button>
-                    <button type="button" role="menuitem" disabled={!activeLayoutId} onClick={() => { setWorkspaceMenuOpen(false); deleteCurrentWorkspaceLayout(); }}>Delete Layout</button>
+                    <button type="button" role="menuitem" disabled={!activeLayoutId || isSharedLayout || isLockedLayout} onClick={() => { setWorkspaceMenuOpen(false); renameCurrentWorkspaceLayout(); }}>Rename Layout</button>
+                    <button type="button" role="menuitem" disabled={!activeLayoutId || isSharedLayout || isLockedLayout} onClick={() => { setWorkspaceMenuOpen(false); deleteCurrentWorkspaceLayout(); }}>Delete Layout</button>
                     <button type="button" role="menuitem" disabled={workspaceLocked} onClick={() => { setWorkspaceMenuOpen(false); resetCurrentWorkspaceLayout(); }}>Reset Layout</button>
                   </div>
                 )}
@@ -2511,11 +2690,74 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
             </div>
           </div>
 
+        <input
+          ref={backgroundInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          data-testid="layout-background-file"
+          style={{ display: 'none' }}
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = '';
+            if (file) uploadLayoutBackground(file);
+          }}
+        />
+        {shareDialogOpen && (
+          <div className="live-share-dialog-backdrop" role="presentation" onClick={() => setShareDialogOpen(false)}>
+            <div className="live-share-dialog" role="dialog" aria-modal="true" aria-labelledby="live-share-title" onClick={(event) => event.stopPropagation()}>
+              <h3 id="live-share-title">Share "{activeLayout?.name}"</h3>
+              <p>People you share with see this layout in their list. They can watch it but not change it.</p>
+              {shareUsers.length === 0 ? (
+                <p className="live-share-empty">There are no other users yet. Add users under Users.</p>
+              ) : (
+                <ul>
+                  {shareUsers.map((user) => (
+                    <li key={user.id}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          data-share-user={user.username}
+                          checked={shareSelection.includes(Number(user.id))}
+                          onChange={(event) => {
+                            const id = Number(user.id);
+                            setShareSelection((previous) => (event.currentTarget.checked
+                              ? [...previous.filter((value) => value !== id), id]
+                              : previous.filter((value) => value !== id)));
+                          }}
+                        />
+                        <span>{user.username}</span>
+                        <span className="live-share-role">{user.role_name || ''}</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="live-share-actions">
+                <button type="button" className="btn-secondary" onClick={() => setShareDialogOpen(false)}>Cancel</button>
+                <button type="button" className="btn-primary" data-testid="layout-share-save" onClick={saveShareSelection}>Save</button>
+              </div>
+            </div>
+          </div>
+        )}
         <div
           id="video-grid"
           ref={workspaceGridRef}
           className={`video-container ${isWorkspaceMode ? 'is-workspace-grid' : gridHasEmptySlots ? 'is-partial-grid' : 'is-filled-grid'} ${visibleWorkspaceTileCount === 1 ? 'is-single-camera' : ''} ${singleCameraMode ? 'is-single-camera-view' : ''} ${isMobileViewport && isWorkspaceMode && !singleCameraMode ? 'is-mobile-workspace-stack' : ''} ${movingTileId ? 'is-moving-tile' : ''}`}
-          style={{ '--grid-cols': workspaceGridCols, '--grid-rows': workspaceGridRows }}
+          style={{
+            '--grid-cols': workspaceGridCols,
+            '--grid-rows': workspaceGridRows,
+            ...(activeLayout?.background && !singleCameraMode ? {
+              // Map or floor plan behind the cameras, dimmed by its opacity
+              backgroundImage: `linear-gradient(rgba(0, 0, 0, ${(1 - (activeLayout.background.opacity || 0.6)).toFixed(2)}), rgba(0, 0, 0, ${(1 - (activeLayout.background.opacity || 0.6)).toFixed(2)})), url(/api/live-layouts/${encodeURIComponent(activeLayout.id)}/background?v=${activeLayout.background.version})`,
+              backgroundSize: 'contain',
+              backgroundPosition: 'center',
+              backgroundRepeat: 'no-repeat',
+              backgroundOrigin: 'content-box',
+              backgroundClip: 'content-box',
+              backgroundColor: '#000',
+            } : {}),
+          }}
+          data-has-background={activeLayout?.background ? 'true' : undefined}
           onDragOver={(event) => {
             if (reorderMode || workspaceLocked) return;
             const types = Array.from(event.dataTransfer.types || []);
