@@ -531,10 +531,17 @@ static cJSON *normalize_live_layouts_json(cJSON *input, const user_t *user, bool
                 int w = clamp_layout_int(cJSON_GetObjectItem(tile_json, "w"), 1, 1, LIVE_LAYOUT_GRID_MAX_SIDE);
                 int h = clamp_layout_int(cJSON_GetObjectItem(tile_json, "h"), 1, 1, LIVE_LAYOUT_GRID_MAX_SIDE);
 
+                int tiles_before = cJSON_GetArraySize(tiles);
                 if (!add_normalized_layout_tile(tiles, cameras, allowed_cameras, tile_id, camera_name, x, y, w, h, error, error_size)) {
                     cJSON_Delete(layout);
                     cJSON_Delete(normalized);
                     return NULL;
+                }
+                // Item resolution of the tile in Live View (auto is the default, not stored)
+                const cJSON *quality = cJSON_GetObjectItem(tile_json, "quality");
+                if (cJSON_GetArraySize(tiles) > tiles_before && cJSON_IsString(quality) &&
+                    (strcmp(quality->valuestring, "high") == 0 || strcmp(quality->valuestring, "low") == 0)) {
+                    cJSON_AddStringToObject(cJSON_GetArrayItem(tiles, tiles_before), "quality", quality->valuestring);
                 }
                 tile_index++;
             }

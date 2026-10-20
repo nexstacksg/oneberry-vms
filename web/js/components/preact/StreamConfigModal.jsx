@@ -1084,6 +1084,27 @@ export function StreamConfigModal({
                   )}
                 </div>
 
+                {/* Recorded stream (live view chooses its stream per tile) */}
+                <div className="border-t border-border pt-4">
+                  <label htmlFor="stream-recording-quality" className="block text-sm font-semibold mb-2">Record stream</label>
+                  <select
+                    id="stream-recording-quality"
+                    name="recordingQuality"
+                    className="w-full px-3 py-2 border border-input rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground"
+                    value={currentStream.secondaryUrl ? (currentStream.recordingQuality || 'high') : 'high'}
+                    onChange={onInputChange}
+                    disabled={!currentStream.secondaryUrl}
+                  >
+                    <option value="high">Main stream (high quality)</option>
+                    <option value="low">Sub stream (low quality)</option>
+                  </select>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {currentStream.secondaryUrl
+                      ? 'Which stream is saved to recordings. Live View picks high or low per tile on its own.'
+                      : 'This camera has no sub stream, so the main stream is recorded.'}
+                  </p>
+                </div>
+
                 {/* Audio Settings */}
                 <div className="border-t border-border pt-4">
                   <h5 className="text-sm font-semibold mb-3">{t('streamsConfig.audioSettings')}</h5>

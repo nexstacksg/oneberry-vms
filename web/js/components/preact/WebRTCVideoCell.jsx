@@ -20,8 +20,7 @@ import { useI18n } from '../../i18n.js';
 import { useQueryClient, fetchJSON } from '../../query-client.js';
 import { createPlayerTelemetry } from '../../utils/player-telemetry.js';
 import { StreamQualitySelector } from './StreamQualitySelector.jsx';
-import { useStreamQuality } from './useStreamQuality.js';
-import { updateStreamRecordingQuality } from '../../utils/stream-quality-utils.js';
+import { useItemQuality } from './useItemQuality.js';
 import { captureVideoSnapshot, createPrivacyHandlers } from './video-cell-helpers.js';
 import { getForcedAspectVideoStyle } from '../../utils/aspect-ratio-utils.js';
 import { PrivacyModeOverlays, StreamStatusBadge } from './VideoCellOverlays.jsx';
@@ -410,6 +409,9 @@ const CONNECTION_QUALITY_THRESHOLDS = {
  * @param {string} props.streamId - Stream ID for stable reference
  * @param {string} [props.forcedAspectRatio] - Show the picture with this shape ("16:9"…), or "auto"
  * @param {Function} [props.onVideoDimensions] - (streamName, width, height) when the picture size is known
+ * @param {string} [props.itemQuality] - This tile's resolution: 'auto' (by tile size), 'high' or 'low'
+ * @param {Function} [props.onItemQualityChange] - Called when the user changes the tile's resolution
+ * @param {boolean} [props.isOnlyItem] - The only camera on the layout (Auto then uses high quality)
  * @returns {JSX.Element} WebRTCVideoCell component
  */
 export function WebRTCVideoCell({
@@ -422,18 +424,15 @@ export function WebRTCVideoCell({
   globalShowDetections = true,
   isPageFullscreen = false,
   forcedAspectRatio = 'auto',
-  onVideoDimensions
+  onVideoDimensions,
+  itemQuality = 'auto',
+  onItemQualityChange,
+  isOnlyItem = false
 }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const forcedVideoStyle = getForcedAspectVideoStyle(forcedAspectRatio);
   const hasForcedAspect = Object.keys(forcedVideoStyle).length > 0;
-  const {
-    hasLowQuality,
-    selectedStreamSource,
-    setStreamQuality,
-    streamQuality,
-  } = useStreamQuality(stream);
   // H.264 version of the selected source, used when this browser cannot play
   // the camera's own codec (e.g. H.265 or MJPEG) over WebRTC: { from, source }
   const [h264Fallback, setH264Fallback] = useState(null);
@@ -457,7 +456,8 @@ export function WebRTCVideoCell({
 
     return true;
   });
-  const [isUpdatingQuality, setIsUpdatingQuality] = useState(false);
+  // Item resolution when the layout does not keep it (no onItemQualityChange)
+  const [localItemQuality, setLocalItemQuality] = useState('auto');
   const [error, setError] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [connectionQuality, setConnectionQuality] = useState('unknown'); // 'unknown', 'good', 'fair', 'poor', 'bad'
@@ -514,30 +514,6 @@ export function WebRTCVideoCell({
   const [fullscreenPlaybackCoverFrame, setFullscreenPlaybackCoverFrame] = useState(null);
   const [isFullscreenPlaybackFrameReady, setIsFullscreenPlaybackFrameReady] = useState(false);
 
-  const handleStreamQualityChange = useCallback((quality) => {
-    if (quality === streamQuality || isUpdatingQuality) {
-      return;
-    }
-
-    setIsUpdatingQuality(true);
-    updateStreamRecordingQuality(stream, quality)
-      .then((normalizedQuality) => {
-        setStreamQuality(normalizedQuality);
-        queryClient.invalidateQueries({ queryKey: ['streams'] });
-        setError(null);
-        setIsLoading(true);
-        setIsPlaying(false);
-        setConnectionQuality('unknown');
-        setRetryCount((value) => value + 1);
-      })
-      .catch((err) => {
-        console.error(`Failed to update recording quality for ${stream?.name}:`, err);
-        showStatusMessage(err?.message || 'Failed to update recording quality');
-      })
-      .finally(() => {
-        setIsUpdatingQuality(false);
-      });
-  }, [isUpdatingQuality, queryClient, setStreamQuality, stream, streamQuality]);
 
   // Backchannel (two-way audio) state
   const [isTalking, setIsTalking] = useState(false);
@@ -737,6 +713,25 @@ export function WebRTCVideoCell({
   const videoRef = useRef(null);
   const playbackVideoRef = useRef(null);
   const cellRef = useRef(null);
+  // Which stream to play: the tile's Auto/High/Low setting (Nx Witness style)
+  const {
+    hasLowQuality,
+    itemQuality: tileItemQuality,
+    effectiveQuality,
+    selectedStreamSource,
+  } = useItemQuality(stream, {
+    itemQuality: onItemQualityChange ? itemQuality : localItemQuality,
+    isOnlyItem,
+    isFullscreen: isFullscreenCell,
+    sizeRef: cellRef,
+  });
+  const handleItemQualityChange = (quality) => {
+    if (onItemQualityChange) {
+      onItemQualityChange(quality);
+    } else {
+      setLocalItemQuality(quality);
+    }
+  };
   const peerConnectionRef = useRef(null);
   const detectionOverlayRef = useRef(null);
   const abortControllerRef = useRef(null);
@@ -2503,9 +2498,9 @@ export function WebRTCVideoCell({
         >
         {hasLowQuality && (
             <StreamQualitySelector
-              disabled={isUpdatingQuality}
-              value={streamQuality}
-              onChange={handleStreamQualityChange}
+              value={tileItemQuality}
+              effectiveQuality={effectiveQuality}
+              onChange={handleItemQualityChange}
             />
         )}
         {showFullStreamControls && (

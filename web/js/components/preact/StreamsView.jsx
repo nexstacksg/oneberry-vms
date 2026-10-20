@@ -68,6 +68,8 @@ function buildStreamFormState(stream, motion, {
     detectionEnabled: stream.detection_based_recording || false,
     detectionModel: stream.detection_model || '',
     recordAudio: stream.record_audio !== undefined ? stream.record_audio : true,
+    // Which stream is recorded: main (high) or sub (low). Live View picks its own per tile.
+    recordingQuality: stream.recording_quality === 'low' ? 'low' : 'high',
     backchannelEnabled: stream.backchannel_enabled !== undefined ? stream.backchannel_enabled : false,
     motionRecordingEnabled: motion ? !!motion.enabled : false,
     motionPreBuffer: motion ? (motion.pre_buffer_seconds || 5) : 5,
@@ -582,6 +584,7 @@ export function StreamsView() {
     segment: 60,
     record: true,
     recordAudio: false,
+    recordingQuality: 'high',
     backchannelEnabled: false,
     // ONVIF capability flag
     isOnvif: false,
@@ -959,6 +962,7 @@ export function StreamsView() {
       pre_detection_buffer: parseInt(currentStream.preBuffer, 10),
       post_detection_buffer: parseInt(currentStream.postBuffer, 10),
       record_audio: currentStream.recordAudio,
+      recording_quality: currentStream.recordingQuality === 'low' && currentStream.secondaryUrl ? 'low' : 'high',
       backchannel_enabled: currentStream.backchannelEnabled,
       // PTZ control settings
       ptz_enabled: !!currentStream.ptzEnabled,
@@ -1190,6 +1194,7 @@ export function StreamsView() {
       segment: 60,
       record: true,
       recordAudio: false,
+    recordingQuality: 'high',
       backchannelEnabled: false,
       isOnvif: false,
       onvifUsername: '',

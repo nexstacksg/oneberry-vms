@@ -20,6 +20,7 @@ import { buildBuildingTree } from '../../utils/building-hierarchy.js';
 import { getAuthHeaders } from '../../utils/auth-utils.js';
 import { useI18n } from '../../i18n.js';
 
+import { normalizeItemQuality } from './useItemQuality.js';
 import {
   CELL_ASPECT_OPTIONS,
   computeCellPadding,
@@ -125,6 +126,8 @@ function getDraggedCameraNames(dataTransfer) {
 function createWorkspaceTile(cameraId, tile = {}) {
   return {
     type: 'camera',
+    // Item resolution in Live View: 'auto' (by tile size), 'high' or 'low'
+    quality: normalizeItemQuality(tile.quality),
     instanceId: tile.id || `tile-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
     cameraId,
     x: Number.isFinite(Number(tile.x)) ? Math.max(0, Math.floor(Number(tile.x))) : 0,
@@ -189,6 +192,7 @@ function normalizeLiveLayouts(data = {}) {
               return {
                 id: String(tile?.id || `tile-${index + 1}`).trim() || `tile-${index + 1}`,
                 camera,
+                quality: normalizeItemQuality(tile?.quality),
                 x: Number.isFinite(Number(tile?.x)) ? Math.max(0, Math.floor(Number(tile.x))) : index,
                 y: Number.isFinite(Number(tile?.y)) ? Math.max(0, Math.floor(Number(tile.y))) : 0,
                 w: Number.isFinite(Number(tile?.w)) ? Math.max(1, Math.floor(Number(tile.w))) : 1,
@@ -441,6 +445,7 @@ function serializeWorkspaceTilesForSave(workspaceTiles) {
   return workspaceTiles.filter((tile) => tile.type !== 'slot' && tile.cameraId).map((tile) => ({
     id: tile.instanceId,
     camera: tile.cameraId,
+    ...(tile.quality && tile.quality !== 'auto' ? { quality: tile.quality } : {}),
     x: Number.isFinite(Number(tile.x)) ? tile.x : 0,
     y: Number.isFinite(Number(tile.y)) ? tile.y : 0,
     w: Number.isFinite(Number(tile.w)) ? tile.w : DEFAULT_WORKSPACE_TILE_W,
@@ -564,6 +569,14 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   });
   // Picture shape each camera actually sends, reported by the video cells
   const [videoAspectByCamera, setVideoAspectByCamera] = useState({});
+  // Item resolution per camera for the classic grid (layout tiles keep their own)
+  const [classicItemQuality, setClassicItemQuality] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('lightnvr-live-item-quality') || '{}') || {};
+    } catch {
+      return {};
+    }
+  });
   // Tile being dragged, and the tile or empty slot it would swap with
   const [movingTileId, setMovingTileId] = useState('');
   const [tileDropTargetId, setTileDropTargetId] = useState('');
@@ -826,6 +839,23 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     }
   );
   const cameraDisplay = cameraDisplayData?.cameras || {};
+
+  const setTileItemQuality = useCallback((tileInstanceId, cameraName, quality) => {
+    const nextQuality = normalizeItemQuality(quality);
+    if (tileInstanceId) {
+      setWorkspaceTiles((previousTiles) => previousTiles.map((tile) => (
+        tile.instanceId === tileInstanceId ? { ...tile, quality: nextQuality } : tile
+      )));
+      return;
+    }
+    setClassicItemQuality((previous) => {
+      const next = { ...previous, [cameraName]: nextQuality };
+      try {
+        localStorage.setItem('lightnvr-live-item-quality', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
 
   const handleVideoDimensions = useCallback((cameraName, width, height) => {
     if (!cameraName || !(width > 0) || !(height > 0)) return;
@@ -2666,6 +2696,9 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                       isPageFullscreen={isFullscreen}
                       forcedAspectRatio={cameraDisplay[stream.name]?.aspectRatio || 'auto'}
                       onVideoDimensions={handleVideoDimensions}
+                      itemQuality={workspaceTile ? workspaceTile.quality : (classicItemQuality[stream.name] || 'auto')}
+                      onItemQualityChange={(quality) => setTileItemQuality(tileInstanceId, stream.name, quality)}
+                      isOnlyItem={singleCameraMode || streamsToShow.length === 1}
                     />
                   </div>
                 );

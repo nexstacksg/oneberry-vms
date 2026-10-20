@@ -1,12 +1,18 @@
-import { STREAM_QUALITY } from '../../utils/stream-quality-utils.js';
 import { useI18n } from '../../i18n.js';
 
+// Live View item resolution (Nx Witness style): Auto picks high or low by tile size
 const qualities = [
-  { value: STREAM_QUALITY.HIGH, labelKey: 'live.highQuality', titleKey: 'live.highQualityTitle' },
-  { value: STREAM_QUALITY.LOW, labelKey: 'live.lowQuality', titleKey: 'live.lowQualityTitle' },
+  { value: 'auto', title: 'Auto: high quality when this tile is large (over 172px tall), alone or fullscreen; low quality otherwise' },
+  { value: 'high', labelKey: 'live.highQuality', titleKey: 'live.highQualityTitle' },
+  { value: 'low', labelKey: 'live.lowQuality', titleKey: 'live.lowQualityTitle' },
 ];
 
-export function StreamQualitySelector({ value, onChange, disabled = false }) {
+/**
+ * @param {Object} props
+ * @param {'auto'|'high'|'low'} props.value  the tile's setting
+ * @param {'high'|'low'} [props.effectiveQuality]  stream in use (shown on Auto)
+ */
+export function StreamQualitySelector({ value, effectiveQuality, onChange, disabled = false }) {
   const { t } = useI18n();
 
   return (
@@ -35,9 +41,10 @@ export function StreamQualitySelector({ value, onChange, disabled = false }) {
             key={quality.value}
             type="button"
             aria-pressed={active}
+            data-item-quality={quality.value}
             disabled={disabled}
             onClick={() => onChange?.(quality.value)}
-            title={t(quality.titleKey)}
+            title={quality.title || t(quality.titleKey)}
             style={{
               minWidth: '32px',
               height: '22px',
@@ -54,7 +61,9 @@ export function StreamQualitySelector({ value, onChange, disabled = false }) {
               transition: 'background-color 0.15s ease',
             }}
           >
-            {t(quality.labelKey)}
+            {quality.value === 'auto'
+              ? (active && effectiveQuality ? `Auto·${effectiveQuality === 'high' ? 'Hi' : 'Lo'}` : 'Auto')
+              : t(quality.labelKey)}
           </button>
         );
       })}

@@ -17,8 +17,7 @@ import { useI18n } from '../../i18n.js';
 import { useQueryClient } from '../../query-client.js';
 import { createPlayerTelemetry } from '../../utils/player-telemetry.js';
 import { StreamQualitySelector } from './StreamQualitySelector.jsx';
-import { useStreamQuality } from './useStreamQuality.js';
-import { updateStreamRecordingQuality } from '../../utils/stream-quality-utils.js';
+import { useItemQuality } from './useItemQuality.js';
 import { captureVideoSnapshot, createPrivacyHandlers } from './video-cell-helpers.js';
 import { PrivacyModeOverlays, StreamStatusBadge } from './VideoCellOverlays.jsx';
 import { LivePreviewPoster } from './LivePreviewPoster.jsx';
@@ -44,21 +43,19 @@ export function HLSVideoCell({
   globalShowDetections = true,
   isPageFullscreen = false,
   forcedAspectRatio = 'auto',
-  onVideoDimensions
+  onVideoDimensions,
+  itemQuality = 'auto',
+  onItemQualityChange,
+  isOnlyItem = false
 }) {
   const forcedVideoStyle = getForcedAspectVideoStyle(forcedAspectRatio);
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const {
-    hasLowQuality,
-    selectedStreamSource,
-    setStreamQuality,
-    streamQuality,
-  } = useStreamQuality(stream);
 
   // Component state
   const [isLoading, setIsLoading] = useState(true);
-  const [isUpdatingQuality, setIsUpdatingQuality] = useState(false);
+  // Item resolution when the layout does not keep it (no onItemQualityChange)
+  const [localItemQuality, setLocalItemQuality] = useState('auto');
   const [error, setError] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
@@ -79,27 +76,6 @@ export function HLSVideoCell({
     return stream && stream.go2rtc_hls_available ? 'go2rtc' : 'native';
   });
 
-  const handleStreamQualityChange = async (quality) => {
-    if (quality === streamQuality || isUpdatingQuality) {
-      return;
-    }
-
-    setIsUpdatingQuality(true);
-    try {
-      const normalizedQuality = await updateStreamRecordingQuality(stream, quality);
-      setStreamQuality(normalizedQuality);
-      queryClient.invalidateQueries({ queryKey: ['streams'] });
-      setError(null);
-      setIsLoading(true);
-      setIsPlaying(false);
-      setRetryCount((value) => value + 1);
-    } catch (err) {
-      console.error(`Failed to update recording quality for ${stream?.name}:`, err);
-      showStatusMessage(err?.message || 'Failed to update recording quality');
-    } finally {
-      setIsUpdatingQuality(false);
-    }
-  };
 
   // PTZ controls state
   const [showPTZControls, setShowPTZControls] = useState(false);
@@ -111,6 +87,25 @@ export function HLSVideoCell({
   // Refs
   const videoRef = useRef(null);
   const cellRef = useRef(null);
+  // Which stream to play: the tile's Auto/High/Low setting (Nx Witness style).
+  // A fullscreen tile is tall, so Auto picks high quality there too.
+  const {
+    hasLowQuality,
+    itemQuality: tileItemQuality,
+    effectiveQuality,
+    selectedStreamSource,
+  } = useItemQuality(stream, {
+    itemQuality: onItemQualityChange ? itemQuality : localItemQuality,
+    isOnlyItem,
+    sizeRef: cellRef,
+  });
+  const handleItemQualityChange = (quality) => {
+    if (onItemQualityChange) {
+      onItemQualityChange(quality);
+    } else {
+      setLocalItemQuality(quality);
+    }
+  };
   const hlsPlayerRef = useRef(null);
   const detectionOverlayRef = useRef(null);
   const fatalErrorCountRef = useRef(0);  // Track consecutive fatal error recovery attempts
@@ -714,9 +709,9 @@ export function HLSVideoCell({
       >
         {hasLowQuality && hlsMode === 'go2rtc' && (
             <StreamQualitySelector
-              disabled={isUpdatingQuality}
-              value={streamQuality}
-              onChange={handleStreamQualityChange}
+              value={tileItemQuality}
+              effectiveQuality={effectiveQuality}
+              onChange={handleItemQualityChange}
             />
         )}
         <div
