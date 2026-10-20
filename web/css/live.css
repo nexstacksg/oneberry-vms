@@ -1722,3 +1722,74 @@
     gap: 0.5rem;
     margin-top: 1rem;
 }
+
+/* Live View scene (Nx Witness style) ------------------------------------- */
+.live-scene-viewport {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.live-scene-viewport.is-zoomed {
+    cursor: grab;
+}
+
+.live-scene-viewport.is-zoomed:active {
+    cursor: grabbing;
+}
+
+/* Grid cells behind the cameras */
+.live-scene-cell {
+    margin: calc(var(--tile-gap-px, 8px) / 2);
+    border: 1px dashed hsl(var(--border));
+    border-radius: 0.4rem;
+    background: hsl(var(--muted) / 0.18);
+    pointer-events: none;
+}
+
+/* A tile spans whole cells; its frame is exactly the camera picture's shape */
+.video-container.is-workspace-grid:not(.is-mobile-workspace-stack) > .live-workspace-tile {
+    container-type: size;
+    display: grid;
+    place-items: center;
+}
+
+.live-tile-frame {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+}
+
+.live-tile-frame > .video-cell {
+    width: 100%;
+    height: 100%;
+}
+
+.live-scene-zoom-badge {
+    position: absolute;
+    right: 0.75rem;
+    bottom: 0.75rem;
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.3rem 0.4rem 0.3rem 0.65rem;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.live-scene-zoom-badge button {
+    padding: 0.15rem 0.6rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.18);
+    color: #fff;
+    font-weight: 600;
+}

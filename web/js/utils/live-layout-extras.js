@@ -22,6 +22,8 @@ export function pickLiveLayoutExtras(layout = {}) {
       }));
   }
   if (typeof layout.cellAspect === 'string') extras.cellAspect = layout.cellAspect;
+  // Positions in whole scene cells (layouts saved before were on a 48-unit grid)
+  if (layout.units === 'cells') extras.units = 'cells';
   if (layout.locked === true) extras.locked = true;
   if (Array.isArray(layout.sharedWith)) {
     extras.sharedWith = layout.sharedWith.map(Number).filter((id) => Number.isFinite(id) && id > 0);

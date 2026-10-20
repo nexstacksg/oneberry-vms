@@ -24,6 +24,16 @@ import { normalizeItemQuality } from './useItemQuality.js';
 import { pickLiveLayoutExtras } from '../../utils/live-layout-extras.js';
 import { validateSession } from '../../utils/auth-utils.js';
 import {
+  SCENE_MAX_SIDE,
+  convertLegacyAreasToCells,
+  findSceneSpot,
+  isAreaFree,
+  normalizeSceneOrigin,
+  packSceneTiles,
+  sceneBounds,
+  spanForAspect,
+} from '../../utils/scene-layout.js';
+import {
   CELL_ASPECT_OPTIONS,
   computeCellPadding,
   findTileAtPoint,
@@ -34,12 +44,15 @@ import {
 
 // Cell shape of the unsaved workspace (saved layouts keep their own)
 const LIVE_CELL_ASPECT_STORAGE_KEY = 'lightnvr-live-cell-aspect';
-const WORKSPACE_GRID_COLS = 48;
-// Same as the columns, so 2x2, 3x3, 4x4, 6x6 and 8x8 split into equal rows
-// (cells keep the layout's cell shape). Older layouts saved as 48x27 are scaled.
-const WORKSPACE_GRID_ROWS = 48;
-const DEFAULT_WORKSPACE_TILE_W = 24;
-const DEFAULT_WORKSPACE_TILE_H = 24;
+// Live View scene (Nx Witness style): tiles sit in whole cells and the scene is
+// as large as they need; these are the most it may grow to in each direction.
+const WORKSPACE_GRID_COLS = SCENE_MAX_SIDE;
+const WORKSPACE_GRID_ROWS = SCENE_MAX_SIDE;
+const DEFAULT_WORKSPACE_TILE_W = 1;
+const DEFAULT_WORKSPACE_TILE_H = 1;
+// Cell shape and screen shape used when tiles are arranged automatically
+// (kept up to date by Live View on every render)
+const sceneContext = { cellAspect: 16 / 9, viewportAspect: 16 / 9 };
 const PENDING_BLANK_WORKSPACE_CAMERAS_KEY = 'oneberry.pendingBlankWorkspaceCameras';
 const WORKSPACE_LAYOUT_PRESETS = [
   { count: 4, cols: 2, rows: 2, label: '2x2' },
@@ -152,18 +165,31 @@ function createWorkspaceSlot(tile = {}) {
 }
 
 // The grid's area inside its padding (Live View pads it to keep the cell shape)
-function getGridContentRect(grid) {
+function getGridContentRect(grid, zoom = 1) {
   const rect = grid.getBoundingClientRect();
   const styles = window.getComputedStyle(grid);
-  const left = Number.parseFloat(styles.paddingLeft) || 0;
-  const right = Number.parseFloat(styles.paddingRight) || 0;
-  const top = Number.parseFloat(styles.paddingTop) || 0;
-  const bottom = Number.parseFloat(styles.paddingBottom) || 0;
+  // Padding is in unzoomed pixels; the rect is on screen (zoomed)
+  const left = (Number.parseFloat(styles.paddingLeft) || 0) * zoom;
+  const right = (Number.parseFloat(styles.paddingRight) || 0) * zoom;
+  const top = (Number.parseFloat(styles.paddingTop) || 0) * zoom;
+  const bottom = (Number.parseFloat(styles.paddingBottom) || 0) * zoom;
   return {
     left: rect.left + left,
     top: rect.top + top,
     width: Math.max(1, rect.width - left - right),
     height: Math.max(1, rect.height - top - bottom),
+  };
+}
+
+// Keep a zoomed scene covering the viewport (no empty space dragged in)
+function clampSceneZoom(zoom, viewport) {
+  if (!viewport || zoom.scale <= 1) return { scale: 1, x: 0, y: 0 };
+  const width = viewport.clientWidth;
+  const height = viewport.clientHeight;
+  return {
+    scale: zoom.scale,
+    x: Math.min(0, Math.max(width - width * zoom.scale, zoom.x)),
+    y: Math.min(0, Math.max(height - height * zoom.scale, zoom.y)),
   };
 }
 
@@ -219,6 +245,7 @@ function normalizeLiveLayouts(data = {}) {
             name: String(layout.name).trim(),
             cols: Number.isFinite(Number(layout.cols)) ? Math.max(1, Math.floor(Number(layout.cols))) : undefined,
             cellAspect: CELL_ASPECT_OPTIONS.includes(layout.cellAspect) ? layout.cellAspect : 'auto',
+            units: layout.units === 'cells' ? 'cells' : undefined,
             rows: Number.isFinite(Number(layout.rows)) ? Math.max(1, Math.floor(Number(layout.rows))) : undefined,
             tiles,
             slots,
@@ -347,25 +374,12 @@ function normalizeWorkspaceBounds(tile, cols, rows) {
 }
 
 function buildResponsiveWorkspaceLayout(workspaceTiles) {
-  const count = workspaceTiles.length;
-  if (count === 0) return [];
-
-  const [layoutCols, layoutRows] = computeOptimalGrid(count);
-  return workspaceTiles.map((tile, index) => {
-    const col = index % layoutCols;
-    const row = Math.floor(index / layoutCols);
-    const x = Math.floor((col * WORKSPACE_GRID_COLS) / layoutCols);
-    const y = Math.floor((row * WORKSPACE_GRID_ROWS) / layoutRows);
-    const nextX = Math.floor(((col + 1) * WORKSPACE_GRID_COLS) / layoutCols);
-    const nextY = Math.floor(((row + 1) * WORKSPACE_GRID_ROWS) / layoutRows);
-    return normalizeWorkspaceBounds({
-      ...tile,
-      x,
-      y,
-      w: Math.max(1, nextX - x),
-      h: Math.max(1, nextY - y),
-    }, WORKSPACE_GRID_COLS, WORKSPACE_GRID_ROWS);
-  });
+  if (workspaceTiles.length === 0) return [];
+  return packSceneTiles(workspaceTiles.map((tile) => ({
+    ...tile,
+    w: Math.max(1, Math.min(SCENE_MAX_SIDE, tile.w || 1)),
+    h: Math.max(1, Math.min(SCENE_MAX_SIDE, tile.h || 1)),
+  })), sceneContext);
 }
 
 function buildWorkspaceInsertionCells(count, cols, rows) {
@@ -480,24 +494,16 @@ function reflowWorkspaceTiles(workspaceTiles, cols) {
 
 function buildWorkspacePresetSlots(preset) {
   const layoutCols = Math.max(1, preset?.cols || 2);
-  const layoutRows = Math.max(1, preset?.rows || 1);
-  const count = Math.max(1, preset?.count || layoutCols * layoutRows);
+  const count = Math.max(1, preset?.count || layoutCols * Math.max(1, preset?.rows || 1));
 
-  return Array.from({ length: count }, (_, index) => {
-    const col = index % layoutCols;
-    const row = Math.floor(index / layoutCols);
-    const x = Math.floor((col * WORKSPACE_GRID_COLS) / layoutCols);
-    const y = Math.floor((row * WORKSPACE_GRID_ROWS) / layoutRows);
-    const nextX = Math.floor(((col + 1) * WORKSPACE_GRID_COLS) / layoutCols);
-    const nextY = Math.floor(((row + 1) * WORKSPACE_GRID_ROWS) / layoutRows);
-    return normalizeWorkspaceBounds(createWorkspaceSlot({
-      id: `slot-${preset.count}-${index + 1}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      x,
-      y,
-      w: Math.max(1, nextX - x),
-      h: Math.max(1, nextY - y),
-    }), WORKSPACE_GRID_COLS, WORKSPACE_GRID_ROWS);
-  });
+  // One cell per camera, like Nx Witness
+  return Array.from({ length: count }, (_, index) => createWorkspaceSlot({
+    id: `slot-${preset.count}-${index + 1}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    x: index % layoutCols,
+    y: Math.floor(index / layoutCols),
+    w: 1,
+    h: 1,
+  }));
 }
 
 function LiveEmptyState({ t, title, message, actionHref, actionLabel, actionOnClick, secondaryText }) {
@@ -588,6 +594,12 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const backgroundInputRef = useRef(null);
   // Tile being dragged, and the tile or empty slot it would swap with
   const [movingTileId, setMovingTileId] = useState('');
+  const [resizingTileId, setResizingTileId] = useState('');
+  // Scene zoom and pan (mouse wheel / drag on empty space), like Nx Witness
+  const [sceneZoom, setSceneZoom] = useState({ scale: 1, x: 0, y: 0 });
+  const sceneZoomRef = useRef(sceneZoom);
+  sceneZoomRef.current = sceneZoom;
+  const sceneViewportRef = useRef(null);
   const [tileDropTargetId, setTileDropTargetId] = useState('');
   const [activeLayoutId, setActiveLayoutId] = useState(() => {
     const p = new URLSearchParams(window.location.search);
@@ -616,6 +628,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const workspaceGridRef = useRef(null);
   const workspacePointerRef = useRef(null);
   const workspaceTilesRef = useRef([]);
+  const cameraSpanRef = useRef(() => ({ w: 1, h: 1 }));
   const workspaceAutoExpandedDropRef = useRef(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [layoutPresetMenuOpen, setLayoutPresetMenuOpen] = useState(false);
@@ -718,8 +731,14 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   // Total streams per page — derived immediately so URL-sync useEffect can reference
   // isSingleStream in its dependency array without TDZ issues.
   const maxStreams = cols * rows;
-  const workspaceGridCols = workspaceStarted ? WORKSPACE_GRID_COLS : cols;
-  const workspaceGridRows = workspaceStarted ? WORKSPACE_GRID_ROWS : rows;
+  // The scene is as big as its tiles; while a tile is resized it gets one spare
+  // column and row so it can grow (moving keeps the grid still under the pointer)
+  const sceneSize = sceneBounds(workspaceTiles);
+  const sceneGrowRoom = resizingTileId ? 1 : 0;
+  const workspaceGridCols = workspaceStarted ? Math.min(SCENE_MAX_SIDE, sceneSize.cols + sceneGrowRoom) : cols;
+  const workspaceGridRows = workspaceStarted ? Math.min(SCENE_MAX_SIDE, sceneSize.rows + sceneGrowRoom) : rows;
+  const gridDimsRef = useRef({ cols: workspaceGridCols, rows: workspaceGridRows });
+  gridDimsRef.current = { cols: workspaceGridCols, rows: workspaceGridRows };
 
   // Clamp cols×rows to MAX_GRID_CELLS — guards against stale URL params or
   // localStorage values written before the 64-stream cap was enforced.
@@ -1200,31 +1219,22 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   useEffect(() => {
     if (!activeLayoutId || !activeLayout || streams.length === 0 || hydratedLayoutId === activeLayoutId) return;
 
-    const layoutAreas = [...activeLayout.tiles, ...(activeLayout.slots || [])];
-    const sourceCols = activeLayout.cols || layoutAreas.reduce((max, tile) => (
-      Math.max(max, (Number(tile.x) || 0) + (Number(tile.w) || 1))
-    ), 1);
-    const sourceRows = activeLayout.rows || layoutAreas.reduce((max, tile) => (
-      Math.max(max, (Number(tile.y) || 0) + (Number(tile.h) || 1))
-    ), 1);
-    const tiles = activeLayout.tiles
+    const rawTiles = activeLayout.tiles
       .filter((tile) => streamByName.has(tile.camera))
-      .map((tile, index) => scaleLayoutTileToWorkspace(
-        createWorkspaceTile(tile.camera, {
-          ...tile,
-          id: tile.id || `tile-${index + 1}`,
-        }),
-        sourceCols,
-        sourceRows
-      ));
-    const slots = (activeLayout.slots || []).map((slot, index) => scaleLayoutTileToWorkspace(
-      createWorkspaceSlot({
-        ...slot,
-        id: slot.id || `slot-${index + 1}`,
-      }),
-      sourceCols,
-      sourceRows
-    ));
+      .map((tile, index) => createWorkspaceTile(tile.camera, {
+        ...tile,
+        id: tile.id || `tile-${index + 1}`,
+      }));
+    const rawSlots = (activeLayout.slots || []).map((slot, index) => createWorkspaceSlot({
+      ...slot,
+      id: slot.id || `slot-${index + 1}`,
+    }));
+    // Layouts saved before the scene used whole cells are converted on open
+    const areas = activeLayout.units === 'cells'
+      ? normalizeSceneOrigin([...rawTiles, ...rawSlots])
+      : convertLegacyAreasToCells([...rawTiles, ...rawSlots]);
+    const tiles = areas.filter((area) => area.type !== 'slot');
+    const slots = areas.filter((area) => area.type === 'slot');
 
     setWorkspaceTiles([...tiles, ...slots]);
     setWorkspaceStarted(true);
@@ -1237,8 +1247,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     const serializedSlots = serializeWorkspaceSlotsForSave(slots);
     lastSavedLayoutPayloadRef.current = JSON.stringify({
       id: activeLayout.id,
-      cols: WORKSPACE_GRID_COLS,
-      rows: WORKSPACE_GRID_ROWS,
+      units: 'cells',
       cellAspect: activeLayout.cellAspect || 'auto',
       tiles: serializedTiles,
       slots: serializedSlots,
@@ -1246,26 +1255,18 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setHydratedLayoutId(activeLayoutId);
   }, [activeLayout, activeLayoutId, hydratedLayoutId, streamByName, streams.length]);
 
-  const getWorkspaceGridPoint = useCallback((event, fallbackIndex = workspaceTiles.length) => {
+  const getWorkspaceGridPoint = useCallback((event) => {
     const grid = workspaceGridRef.current;
-    if (!grid) {
-      return {
-        x: workspaceGridCols > 0 ? fallbackIndex % workspaceGridCols : fallbackIndex,
-        y: workspaceGridCols > 0 ? Math.floor(fallbackIndex / workspaceGridCols) : 0,
-      };
-    }
-
-    const rect = getGridContentRect(grid);
-    const styles = window.getComputedStyle(grid);
-    const gap = Number.parseFloat(styles.columnGap || styles.gap || '0') || 0;
-    const safeCols = Math.max(1, workspaceGridCols);
-    const safeRows = Math.max(1, workspaceGridRows);
-    const cellWidth = (rect.width - (gap * (safeCols - 1))) / safeCols;
-    const cellHeight = (rect.height - (gap * (safeRows - 1))) / safeRows;
-    const x = Math.max(0, Math.min(safeCols - 1, Math.floor((event.clientX - rect.left) / Math.max(1, cellWidth + gap))));
-    const y = Math.max(0, Math.min(safeRows - 1, Math.floor((event.clientY - rect.top) / Math.max(1, cellHeight + gap))));
-    return { x, y };
-  }, [workspaceGridCols, workspaceGridRows, workspaceTiles.length]);
+    const { cols: gridCols, rows: gridRows } = gridDimsRef.current;
+    if (!grid) return { x: 0, y: 0 };
+    const rect = getGridContentRect(grid, sceneZoomRef.current.scale);
+    const x = Math.floor(((event.clientX - rect.left) / rect.width) * gridCols);
+    const y = Math.floor(((event.clientY - rect.top) / rect.height) * gridRows);
+    return {
+      x: Math.max(0, Math.min(gridCols - 1, x)),
+      y: Math.max(0, Math.min(gridRows - 1, y)),
+    };
+  }, []);
 
   const updateWorkspaceTile = useCallback((instanceId, updater) => {
     setWorkspaceTiles((previousTiles) => {
@@ -1274,8 +1275,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
 
       const proposedTile = normalizeWorkspaceBounds(
         typeof updater === 'function' ? updater(currentTile) : { ...currentTile, ...updater },
-        workspaceGridCols,
-        workspaceGridRows
+        SCENE_MAX_SIDE,
+        SCENE_MAX_SIDE
       );
       const collision = findTileCollision(proposedTile, previousTiles, instanceId);
 
@@ -1295,7 +1296,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
 
       return previousTiles;
     });
-  }, [workspaceGridCols, workspaceGridRows]);
+  }, []);
 
   const addWorkspaceTile = useCallback((cameraName, placement = null, options = {}) => {
     const cameraId = String(cameraName || '').trim();
@@ -1320,7 +1321,9 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         window.setTimeout(showLayoutFullMessage, 0);
         return previousTiles;
       }
-      const candidateTile = createWorkspaceTile(cameraId);
+      // Cells shaped like the camera's picture (Nx Witness style)
+      const span = cameraSpanRef.current(cameraId, previousTiles);
+      const candidateTile = createWorkspaceTile(cameraId, { w: span.w, h: span.h });
       const targetSlot = previousTiles.find((tile) => {
         if (tile.type !== 'slot') return false;
         if (!placement) return true;
@@ -1334,13 +1337,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       if (targetSlot) {
         return previousTiles.map((tile) => (
           tile.instanceId === targetSlot.instanceId
-            ? normalizeWorkspaceBounds({
-              ...candidateTile,
-              x: targetSlot.x,
-              y: targetSlot.y,
-              w: targetSlot.w,
-              h: targetSlot.h,
-            }, workspaceGridCols, workspaceGridRows)
+            ? { ...candidateTile, x: targetSlot.x, y: targetSlot.y, w: targetSlot.w, h: targetSlot.h }
             : tile
         ));
       }
@@ -1349,51 +1346,10 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         return buildResponsiveWorkspaceLayout([...previousTiles, candidateTile]);
       }
 
-      const openArea = findBestOpenWorkspaceArea(
-        previousTiles,
-        workspaceGridCols,
-        workspaceGridRows,
-        placement
-      );
-      const openSlot = openArea || findOpenWorkspaceSlot(
-        previousTiles,
-        Math.min(DEFAULT_WORKSPACE_TILE_W, workspaceGridCols),
-        Math.min(DEFAULT_WORKSPACE_TILE_H, workspaceGridRows),
-        workspaceGridCols,
-        workspaceGridRows
-      );
-      const point = openArea || placement || {
-        x: openSlot?.x ?? 0,
-        y: openSlot?.y ?? 0,
-      };
-      const nextTile = normalizeWorkspaceBounds({
-        ...candidateTile,
-        x: point.x,
-        y: point.y,
-        w: openArea?.w ?? DEFAULT_WORKSPACE_TILE_W,
-        h: openArea?.h ?? DEFAULT_WORKSPACE_TILE_H,
-      }, workspaceGridCols, workspaceGridRows);
-      const collision = findTileCollision(nextTile, previousTiles);
-      if (collision) {
-        if (!openSlot) {
-          return insertWorkspaceTileWithBalancedSpace(
-            previousTiles,
-            candidateTile,
-            workspaceGridCols,
-            workspaceGridRows,
-            placement
-          );
-        }
-        const fallback = normalizeWorkspaceBounds(createWorkspaceTile(cameraId, {
-          x: openSlot.x,
-          y: openSlot.y,
-          w: openSlot.w ?? DEFAULT_WORKSPACE_TILE_W,
-          h: openSlot.h ?? DEFAULT_WORKSPACE_TILE_H,
-        }), workspaceGridCols, workspaceGridRows);
-        return [...previousTiles, fallback];
-      }
-
-      return [...previousTiles, nextTile];
+      const spot = placement && isAreaFree(previousTiles, placement.x, placement.y, span.w, span.h)
+        ? placement
+        : findSceneSpot(previousTiles, span.w, span.h, { preferred: placement, ...sceneContext });
+      return normalizeSceneOrigin([...previousTiles, { ...candidateTile, x: spot.x, y: spot.y }]);
     });
     if (placement) {
       setWorkspaceAutoGrid(workspaceAutoExpandedDropRef.current);
@@ -1402,7 +1358,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     }
     setCurrentPage(0);
     setSelectedStream(cameraId);
-  }, [activeLayoutId, streamByName, workspaceAutoGrid, workspaceGridCols, workspaceGridRows, workspaceLocked]);
+  }, [activeLayoutId, streamByName, workspaceAutoGrid, workspaceLocked]);
 
   const openBlankWorkspaceWithCameras = useCallback((cameraNames) => {
     const requestedCameraNames = Array.isArray(cameraNames) ? cameraNames : [];
@@ -1503,7 +1459,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     const grid = workspaceGridRef.current;
     if (!grid) return { width: 1, height: 1 };
 
-    const rect = getGridContentRect(grid);
+    const rect = getGridContentRect(grid, sceneZoomRef.current.scale);
     const styles = window.getComputedStyle(grid);
     const gap = Number.parseFloat(styles.columnGap || styles.gap || '0') || 0;
     const safeCols = Math.max(1, workspaceGridCols);
@@ -1519,49 +1475,45 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     if (!state) return;
 
     event.preventDefault();
-    const cellSize = getWorkspaceCellSize();
-    const dx = Math.round((event.clientX - state.startX) / cellSize.width);
-    const dy = Math.round((event.clientY - state.startY) / cellSize.height);
+    const point = getWorkspaceGridPoint(event);
+    const start = state.startTile;
 
     if (state.mode === 'move') {
       // Over another tile or an empty slot: drop there to swap places (Nx Witness style)
-      const dropTarget = findTileAtPoint(workspaceTilesRef.current, getWorkspaceGridPoint(event), state.instanceId);
+      const dropTarget = findTileAtPoint(workspaceTilesRef.current, point, state.instanceId);
       const dropTargetId = dropTarget?.instanceId || '';
       if (dropTargetId !== state.dropTargetId) {
         state.dropTargetId = dropTargetId;
         setTileDropTargetId(dropTargetId);
       }
       if (dropTargetId) return;
-      if (dx === 0 && dy === 0) return;
+      const x = point.x - state.grab.x;
+      const y = point.y - state.grab.y;
+      if (x === state.lastX && y === state.lastY) return;
+      state.lastX = x;
+      state.lastY = y;
       setWorkspaceAutoGrid(false);
-      updateWorkspaceTile(state.instanceId, {
-        ...state.startTile,
-        x: state.startTile.x + dx,
-        y: state.startTile.y + dy,
-      });
+      updateWorkspaceTile(state.instanceId, { ...start, x: Math.max(0, x), y: Math.max(0, y) });
       return;
     }
 
-    const nextTile = { ...state.startTile };
-    if (state.edges.includes('e')) {
-      nextTile.w = state.startTile.w + dx;
-    }
-    if (state.edges.includes('s')) {
-      nextTile.h = state.startTile.h + dy;
-    }
+    // Resize by whole cells; the scene grows when a tile is made bigger
+    const nextTile = { ...start };
+    if (state.edges.includes('e')) nextTile.w = Math.max(1, point.x - start.x + 1);
+    if (state.edges.includes('s')) nextTile.h = Math.max(1, point.y - start.y + 1);
     if (state.edges.includes('w')) {
-      nextTile.x = state.startTile.x + dx;
-      nextTile.w = state.startTile.w - dx;
+      const right = start.x + start.w;
+      nextTile.x = Math.min(point.x, right - 1);
+      nextTile.w = right - nextTile.x;
     }
     if (state.edges.includes('n')) {
-      nextTile.y = state.startTile.y + dy;
-      nextTile.h = state.startTile.h - dy;
+      const bottom = start.y + start.h;
+      nextTile.y = Math.min(point.y, bottom - 1);
+      nextTile.h = bottom - nextTile.y;
     }
-    if (dx !== 0 || dy !== 0) {
-      setWorkspaceAutoGrid(false);
-    }
+    setWorkspaceAutoGrid(false);
     updateWorkspaceTile(state.instanceId, nextTile);
-  }, [getWorkspaceCellSize, getWorkspaceGridPoint, updateWorkspaceTile]);
+  }, [getWorkspaceGridPoint, updateWorkspaceTile]);
 
   const finishWorkspacePointer = useCallback(() => {
     const state = workspacePointerRef.current;
@@ -1569,7 +1521,10 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       const { instanceId, dropTargetId } = state;
       setWorkspaceTiles((previousTiles) => swapTilePlaces(previousTiles, instanceId, dropTargetId));
     }
+    // Keep the scene starting at the top-left cell
+    setWorkspaceTiles((previousTiles) => normalizeSceneOrigin(previousTiles));
     setMovingTileId('');
+    setResizingTileId('');
     setTileDropTargetId('');
     workspacePointerRef.current = null;
     window.removeEventListener('pointermove', handleWorkspacePointerMove);
@@ -1597,11 +1552,18 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     }
     if (mode === 'move') {
       setMovingTileId(tile.instanceId);
+    } else {
+      setResizingTileId(tile.instanceId);
     }
+    const startPoint = getWorkspaceGridPoint(event);
     workspacePointerRef.current = {
       mode,
       edges,
       dropTargetId: '',
+      // Cell of the tile that was grabbed, so moving keeps it under the pointer
+      grab: { x: startPoint.x - tile.x, y: startPoint.y - tile.y },
+      lastX: tile.x,
+      lastY: tile.y,
       instanceId: tile.instanceId,
       startTile: { ...tile },
       startX: event.clientX,
@@ -1610,7 +1572,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     window.addEventListener('pointermove', handleWorkspacePointerMove);
     window.addEventListener('pointerup', finishWorkspacePointer);
     window.addEventListener('pointercancel', finishWorkspacePointer);
-  }, [finishWorkspacePointer, handleWorkspacePointerMove, isMobileViewport, workspaceLocked, workspaceStarted]);
+  }, [finishWorkspacePointer, getWorkspaceGridPoint, handleWorkspacePointerMove, isMobileViewport, workspaceLocked, workspaceStarted]);
 
   useEffect(() => () => {
     finishWorkspacePointer();
@@ -1647,8 +1609,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     const slots = serializeWorkspaceSlotsForSave(workspaceTiles);
     const payloadKey = JSON.stringify({
       id: activeLayoutId,
-      cols: WORKSPACE_GRID_COLS,
-      rows: WORKSPACE_GRID_ROWS,
+      units: 'cells',
       cellAspect: layoutCellAspect,
       tiles,
       slots,
@@ -1667,8 +1628,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
           layout.id === activeLayoutId
             ? {
               ...layout,
-              cols: WORKSPACE_GRID_COLS,
-              rows: WORKSPACE_GRID_ROWS,
+              units: 'cells',
               cellAspect: layoutCellAspect,
               tiles,
               slots,
@@ -1809,8 +1769,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     const nextLayout = {
       id: createLiveLayoutId(),
       name,
-      cols: WORKSPACE_GRID_COLS,
-      rows: WORKSPACE_GRID_ROWS,
+      units: 'cells',
       cellAspect: layoutCellAspect,
       tiles,
       slots,
@@ -1826,8 +1785,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setLayoutEditMode(false);
     lastSavedLayoutPayloadRef.current = JSON.stringify({
       id: savedLayout.id,
-      cols: WORKSPACE_GRID_COLS,
-      rows: WORKSPACE_GRID_ROWS,
+      units: 'cells',
       cellAspect: layoutCellAspect,
       tiles,
       slots,
@@ -1850,8 +1808,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         layout.id === activeLayoutId
           ? {
             ...layout,
-            cols: WORKSPACE_GRID_COLS,
-            rows: WORKSPACE_GRID_ROWS,
+            units: 'cells',
             cellAspect: layoutCellAspect,
             tiles,
             slots,
@@ -1863,8 +1820,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     await saveLiveLayouts(nextLayouts, previousLayouts);
     lastSavedLayoutPayloadRef.current = JSON.stringify({
       id: activeLayoutId,
-      cols: WORKSPACE_GRID_COLS,
-      rows: WORKSPACE_GRID_ROWS,
+      units: 'cells',
       cellAspect: layoutCellAspect,
       tiles,
       slots,
@@ -2212,8 +2168,26 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const cellArrangement = singleCameraMode
     ? { cols: 1, rows: 1 }
     : isWorkspaceMode
-      ? getTileArrangement(workspaceTiles)
+      ? { cols: workspaceGridCols, rows: workspaceGridRows }
       : { cols, rows };
+
+  // Shape of each camera's picture: forced in its settings, else what it sends
+  const getCameraAspect = (cameraName) => {
+    const stream = streamByName.get(cameraName);
+    return parseAspectRatio(cameraDisplay[cameraName]?.aspectRatio) ||
+      videoAspectByCamera[cameraName] ||
+      (stream?.width > 0 && stream?.height > 0 ? stream.width / stream.height : null);
+  };
+  // Cells a new camera takes; the first camera on an "auto" layout sets the cell shape
+  cameraSpanRef.current = (cameraName, existingTiles) => {
+    const hasCameras = (existingTiles || []).some((tile) => tile.type !== 'slot' && tile.cameraId);
+    if (!hasCameras && layoutCellAspect === 'auto') return { w: 1, h: 1 };
+    return spanForAspect(getCameraAspect(cameraName), effectiveCellAspect);
+  };
+  sceneContext.cellAspect = effectiveCellAspect;
+  if (typeof window !== 'undefined' && window.innerHeight > 0) {
+    sceneContext.viewportAspect = window.innerWidth / window.innerHeight;
+  }
 
   // Black space around the grid so every cell keeps the cell shape
   useEffect(() => {
@@ -2251,6 +2225,38 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     observer.observe(grid);
     return () => observer.disconnect();
   }, [cellArrangement.cols, cellArrangement.rows, effectiveCellAspect, isMobileViewport, isWorkspaceMode, singleCameraMode, streamsToShow.length]);
+
+  // Mouse wheel zooms the scene around the pointer (Nx Witness style)
+  useEffect(() => {
+    const viewport = sceneViewportRef.current;
+    if (!viewport || !isWorkspaceMode || isMobileViewport) return undefined;
+    const handleWheel = (event) => {
+      if (event.ctrlKey && event.deltaY === 0) return;
+      event.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      const pointerX = event.clientX - rect.left;
+      const pointerY = event.clientY - rect.top;
+      setSceneZoom((previous) => {
+        const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const scale = Math.max(1, Math.min(6, previous.scale * factor));
+        if (scale <= 1.001) return { scale: 1, x: 0, y: 0 };
+        // Keep the point under the pointer where it is
+        const ratio = scale / previous.scale;
+        return clampSceneZoom({
+          scale,
+          x: pointerX - (pointerX - previous.x) * ratio,
+          y: pointerY - (pointerY - previous.y) * ratio,
+        }, viewport);
+      });
+    };
+    viewport.addEventListener('wheel', handleWheel, { passive: false });
+    return () => viewport.removeEventListener('wheel', handleWheel);
+  }, [isMobileViewport, isWorkspaceMode]);
+
+  // Zoom resets when another layout is opened
+  useEffect(() => {
+    setSceneZoom({ scale: 1, x: 0, y: 0 });
+  }, [activeLayoutId, singleCameraMode]);
 
   // The unsaved workspace remembers its cell shape in this browser
   useEffect(() => {
@@ -2740,12 +2746,45 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
           </div>
         )}
         <div
+          ref={sceneViewportRef}
+          className={`live-scene-viewport ${isWorkspaceMode && sceneZoom.scale > 1.001 ? 'is-zoomed' : ''}`}
+          onPointerDown={(event) => {
+            // Drag empty space to move around a zoomed scene
+            if (!isWorkspaceMode || sceneZoomRef.current.scale <= 1.001 || event.button !== 0) return;
+            if (event.target.closest('.live-workspace-tile, .live-workspace-slot, button, input, select, textarea')) return;
+            const startX = event.clientX;
+            const startY = event.clientY;
+            const startZoom = sceneZoomRef.current;
+            const move = (moveEvent) => {
+              setSceneZoom(clampSceneZoom({
+                ...startZoom,
+                x: startZoom.x + (moveEvent.clientX - startX),
+                y: startZoom.y + (moveEvent.clientY - startY),
+              }, sceneViewportRef.current));
+            };
+            const up = () => {
+              window.removeEventListener('pointermove', move);
+              window.removeEventListener('pointerup', up);
+            };
+            window.addEventListener('pointermove', move);
+            window.addEventListener('pointerup', up);
+          }}
+          onDblClick={(event) => {
+            if (!isWorkspaceMode || event.target.closest('.live-workspace-tile, .live-workspace-slot')) return;
+            setSceneZoom({ scale: 1, x: 0, y: 0 });
+          }}
+        >
+        <div
           id="video-grid"
           ref={workspaceGridRef}
           className={`video-container ${isWorkspaceMode ? 'is-workspace-grid' : gridHasEmptySlots ? 'is-partial-grid' : 'is-filled-grid'} ${visibleWorkspaceTileCount === 1 ? 'is-single-camera' : ''} ${singleCameraMode ? 'is-single-camera-view' : ''} ${isMobileViewport && isWorkspaceMode && !singleCameraMode ? 'is-mobile-workspace-stack' : ''} ${movingTileId ? 'is-moving-tile' : ''}`}
           style={{
             '--grid-cols': workspaceGridCols,
             '--grid-rows': workspaceGridRows,
+            ...(isWorkspaceMode && sceneZoom.scale > 1.001 ? {
+              transform: `translate(${sceneZoom.x}px, ${sceneZoom.y}px) scale(${sceneZoom.scale})`,
+              transformOrigin: '0 0',
+            } : {}),
             ...(activeLayout?.background && !singleCameraMode ? {
               // Map or floor plan behind the cameras, dimmed by its opacity
               backgroundImage: `linear-gradient(rgba(0, 0, 0, ${(1 - (activeLayout.background.opacity || 0.6)).toFixed(2)}), rgba(0, 0, 0, ${(1 - (activeLayout.background.opacity || 0.6)).toFixed(2)})), url(/api/live-layouts/${encodeURIComponent(activeLayout.id)}/background?v=${activeLayout.background.version})`,
@@ -2834,6 +2873,20 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
             />
           ) : (
             <>
+              {isWorkspaceMode && !singleCameraMode && !isMobileViewport && Array.from(
+                { length: workspaceGridCols * workspaceGridRows },
+                (_, cellIndex) => (
+                  <div
+                    key={`scene-cell-${cellIndex}`}
+                    className="live-scene-cell"
+                    aria-hidden="true"
+                    style={{
+                      gridColumn: `${(cellIndex % workspaceGridCols) + 1}`,
+                      gridRow: `${Math.floor(cellIndex / workspaceGridCols) + 1}`,
+                    }}
+                  />
+                )
+              )}
               {(isWorkspaceMode ? workspaceTiles : streamsToShow).map((item, index) => {
                 const workspaceTile = isWorkspaceMode ? item : null;
                 const isWorkspaceSlot = isWorkspaceMode && workspaceTile?.type === 'slot';
@@ -2955,6 +3008,16 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                         ))}
                       </>
                     )}
+                    <div
+                      className={`live-tile-frame ${isWorkspaceMode && !isMobileViewport ? 'is-fitted' : ''}`}
+                      style={(() => {
+                        const aspect = isWorkspaceMode && !isMobileViewport ? getCameraAspect(stream.name) : null;
+                        return aspect ? {
+                          width: `min(100cqw, calc(100cqh * ${aspect.toFixed(4)}))`,
+                          height: `min(100cqh, calc(100cqw / ${aspect.toFixed(4)}))`,
+                        } : undefined;
+                      })()}
+                    >
                     <VideoCell
                       stream={stream}
                       onToggleFullscreen={toggleStreamFullscreen}
@@ -2970,11 +3033,19 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                       onItemQualityChange={(quality) => setTileItemQuality(tileInstanceId, stream.name, quality)}
                       isOnlyItem={singleCameraMode || streamsToShow.length === 1}
                     />
+                    </div>
                   </div>
                 );
               })}
             </>
           )}
+        </div>
+        {isWorkspaceMode && sceneZoom.scale > 1.001 && (
+          <div className="live-scene-zoom-badge" data-testid="scene-zoom-badge">
+            <span>{Math.round(sceneZoom.scale * 100)}%</span>
+            <button type="button" onClick={() => setSceneZoom({ scale: 1, x: 0, y: 0 })}>Fit</button>
+          </div>
+        )}
         </div>
 
         {!isWebRTC && isFullscreen && isSingleStream && selectedStream && (

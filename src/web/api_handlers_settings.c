@@ -541,9 +541,41 @@ static cJSON *normalize_live_layouts_json(cJSON *input, const user_t *user, bool
              strcmp(cell_aspect->valuestring, "9:16") == 0)) {
             cJSON_AddStringToObject(layout, "cellAspect", cell_aspect->valuestring);
         }
+        // Tile positions are in whole scene cells (older layouts used a 48-unit grid)
+        const cJSON *units = cJSON_GetObjectItem(input_layout, "units");
+        if (cJSON_IsString(units) && strcmp(units->valuestring, "cells") == 0) {
+            cJSON_AddStringToObject(layout, "units", "cells");
+        }
         cJSON_AddItemToObject(layout, "tiles", tiles);
         cJSON_AddItemToObject(layout, "cameras", cameras);
         add_live_layout_extras(layout, input_layout, owner_user_id);
+
+        // Empty slots (places for cameras, e.g. from a 2x2 preset)
+        cJSON *slots = cJSON_CreateArray();
+        const cJSON *slot_json;
+        cJSON_ArrayForEach(slot_json, cJSON_GetObjectItem(input_layout, "slots")) {
+            if (!cJSON_IsObject(slot_json) || cJSON_GetArraySize(slots) >= LIVE_LAYOUT_MAX_ITEMS_LIMIT) continue;
+            const cJSON *slot_id_json = cJSON_GetObjectItem(slot_json, "id");
+            char slot_id[LIVE_LAYOUT_TILE_MAX_LEN + 1];
+            if (cJSON_IsString(slot_id_json) && slot_id_json->valuestring) {
+                trim_location_value(slot_id_json->valuestring, slot_id, sizeof(slot_id));
+            } else {
+                snprintf(slot_id, sizeof(slot_id), "slot-%d", cJSON_GetArraySize(slots) + 1);
+            }
+            if (!is_valid_layout_tile_id(slot_id)) continue;
+            cJSON *slot = cJSON_CreateObject();
+            cJSON_AddStringToObject(slot, "id", slot_id);
+            cJSON_AddNumberToObject(slot, "x", clamp_layout_int(cJSON_GetObjectItem(slot_json, "x"), 0, 0, LIVE_LAYOUT_GRID_MAX_SIDE - 1));
+            cJSON_AddNumberToObject(slot, "y", clamp_layout_int(cJSON_GetObjectItem(slot_json, "y"), 0, 0, LIVE_LAYOUT_GRID_MAX_SIDE - 1));
+            cJSON_AddNumberToObject(slot, "w", clamp_layout_int(cJSON_GetObjectItem(slot_json, "w"), 1, 1, LIVE_LAYOUT_GRID_MAX_SIDE));
+            cJSON_AddNumberToObject(slot, "h", clamp_layout_int(cJSON_GetObjectItem(slot_json, "h"), 1, 1, LIVE_LAYOUT_GRID_MAX_SIDE));
+            cJSON_AddItemToArray(slots, slot);
+        }
+        if (cJSON_GetArraySize(slots) > 0) {
+            cJSON_AddItemToObject(layout, "slots", slots);
+        } else {
+            cJSON_Delete(slots);
+        }
         if (only_current_user && shared_with_me) {
             // Shown read-only to the people it is shared with
             cJSON_DeleteItemFromObject(layout, "sharedWith");
