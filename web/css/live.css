@@ -1856,3 +1856,9 @@
 .live-tile-frame .live-workspace-resize-handle.is-ne::after { border-top-width: 3px; border-right-width: 3px; }
 .live-tile-frame .live-workspace-resize-handle.is-sw::after { border-bottom-width: 3px; border-left-width: 3px; }
 .live-tile-frame .live-workspace-resize-handle.is-se::after { border-bottom-width: 3px; border-right-width: 3px; }
+
+/* Cameras a resize will move aside */
+.video-container.is-workspace-grid .live-workspace-tile.is-displaced {
+    opacity: 0.45;
+    transform: scale(0.96);
+}

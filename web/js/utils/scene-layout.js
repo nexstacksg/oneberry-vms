@@ -172,3 +172,48 @@ export function convertLegacyAreasToCells(areas) {
   });
   return normalizeSceneOrigin(converted);
 }
+
+/**
+ * Give one tile a new place/size; tiles it now covers move to the nearest
+ * free cells (the scene grows if needed) and empty slots it covers go away.
+ * This is how a camera is made bigger in Nx Witness: the others make room
+ * and, with the scene fitted to the screen, show smaller.
+ * @param {Object[]} tiles
+ * @param {string} tileId
+ * @param {{x:number,y:number,w:number,h:number}} rect
+ * @param {Object} [context] { cellAspect, viewportAspect }
+ * @returns {Object[]}
+ */
+export function placeTileWithDisplacement(tiles, tileId, rect, context = {}) {
+  const resized = (tiles || []).find((tile) => tile.instanceId === tileId);
+  if (!resized) return tiles;
+  const placed = { ...resized, ...rect };
+  const covers = (tile) => (
+    tile.instanceId !== tileId &&
+    placed.x < tile.x + tile.w && placed.x + placed.w > tile.x &&
+    placed.y < tile.y + tile.h && placed.y + placed.h > tile.y
+  );
+
+  const kept = [];
+  const displaced = [];
+  tiles.forEach((tile) => {
+    if (tile.instanceId === tileId) return;
+    if (!covers(tile)) {
+      kept.push(tile);
+    } else if (tile.type !== 'slot') {
+      displaced.push(tile);
+    }
+  });
+
+  let result = [...kept, placed];
+  displaced
+    .sort((a, b) => (a.y - b.y) || (a.x - b.x))
+    .forEach((tile) => {
+      const spot = findSceneSpot(result, tile.w, tile.h, { ...context, preferred: { x: tile.x, y: tile.y } });
+      result = [...result, { ...tile, x: spot.x, y: spot.y }];
+    });
+
+  // Keep the original order of tiles (stable keys and drawing order)
+  const byId = new Map(result.map((tile) => [tile.instanceId, tile]));
+  return normalizeSceneOrigin(tiles.filter((tile) => byId.has(tile.instanceId)).map((tile) => byId.get(tile.instanceId)));
+}

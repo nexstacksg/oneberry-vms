@@ -30,6 +30,7 @@ import {
   isAreaFree,
   normalizeSceneOrigin,
   packSceneTiles,
+  placeTileWithDisplacement,
   sceneBounds,
   spanForAspect,
 } from '../../utils/scene-layout.js';
@@ -597,6 +598,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const [resizingTileId, setResizingTileId] = useState('');
   // Cells a dragged/resized tile will snap to when released
   const [snapPreview, setSnapPreview] = useState(null);
+  // Cameras a resize will push aside (shown dimmed until release)
+  const [displacedTileIds, setDisplacedTileIds] = useState([]);
   // Where tiles were on screen just before a change, so they can glide to their new place
   const flipFromRef = useRef(null);
   // Scene zoom and pan (mouse wheel / drag on empty space), like Nx Witness
@@ -1546,9 +1549,22 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     }
 
     if (target.valid === undefined) {
-      target.valid = target.x >= 0 && target.y >= 0 &&
-        target.x + target.w <= SCENE_MAX_SIDE && target.y + target.h <= SCENE_MAX_SIDE &&
-        isAreaFree(tiles, target.x, target.y, target.w, target.h, state.instanceId);
+      const inScene = target.x >= 0 && target.y >= 0 &&
+        target.x + target.w <= SCENE_MAX_SIDE && target.y + target.h <= SCENE_MAX_SIDE;
+      if (state.mode === 'resize') {
+        // Making a camera bigger: the cameras it covers move aside on release (Nx Witness style)
+        target.valid = inScene;
+        const covered = tiles
+          .filter((tile) => tile.instanceId !== state.instanceId && tile.type !== 'slot' &&
+            !isAreaFree([tile], target.x, target.y, target.w, target.h))
+          .map((tile) => tile.instanceId);
+        if (covered.join() !== (state.displaced || []).join()) {
+          state.displaced = covered;
+          setDisplacedTileIds(covered);
+        }
+      } else {
+        target.valid = inScene && isAreaFree(tiles, target.x, target.y, target.w, target.h, state.instanceId);
+      }
     }
     const previous = state.target;
     if (!previous || previous.x !== target.x || previous.y !== target.y || previous.w !== target.w ||
@@ -1575,6 +1591,14 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       if (state.mode === 'move' && state.dropTargetId) {
         const { instanceId, dropTargetId } = state;
         setWorkspaceTiles((previousTiles) => normalizeSceneOrigin(swapTilePlaces(previousTiles, instanceId, dropTargetId)));
+      } else if (target?.valid && state.mode === 'resize') {
+        setWorkspaceAutoGrid(false);
+        setWorkspaceTiles((previousTiles) => placeTileWithDisplacement(
+          previousTiles,
+          state.instanceId,
+          { x: target.x, y: target.y, w: target.w, h: target.h },
+          sceneContext
+        ));
       } else if (target?.valid) {
         setWorkspaceAutoGrid(false);
         setWorkspaceTiles((previousTiles) => normalizeSceneOrigin(previousTiles.map((tile) => (
@@ -1589,6 +1613,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setResizingTileId('');
     setTileDropTargetId('');
     setSnapPreview(null);
+    setDisplacedTileIds([]);
     workspacePointerRef.current = null;
     window.removeEventListener('pointermove', handleWorkspacePointerMove);
     window.removeEventListener('pointerup', finishWorkspacePointer);
@@ -3069,7 +3094,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                   <div
                     key={tileInstanceId || stream.name}
                     data-tile-id={tileInstanceId || undefined}
-                    className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && resizingTileId === tileInstanceId ? 'is-resizing' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
+                    className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && resizingTileId === tileInstanceId ? 'is-resizing' : ''} ${tileInstanceId && displacedTileIds.includes(tileInstanceId) ? 'is-displaced' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
                     style={{
                       position: 'relative',
                       ...(isSingleCameraActiveTile ? {

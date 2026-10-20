@@ -4,6 +4,7 @@ import {
   isAreaFree,
   normalizeSceneOrigin,
   packSceneTiles,
+  placeTileWithDisplacement,
   sceneBounds,
   spanForAspect,
 } from '../js/utils/scene-layout.js';
@@ -84,5 +85,29 @@ describe('convertLegacyAreasToCells', () => {
     const converted = convertLegacyAreasToCells(old);
     expect(converted[0]).toMatchObject({ w: 2, h: 2 });
     expect(converted.slice(1).every((t) => t.w === 1 && t.h === 1)).toBe(true);
+  });
+});
+
+describe('placeTileWithDisplacement (make a camera bigger, others make room)', () => {
+  const ctx = { cellAspect: 16 / 9, viewportAspect: 16 / 9 };
+  it('2x2 full scene: growing one camera to 2x2 moves the other three out, scene grows', () => {
+    const tiles = [tile('a', 0, 0), tile('b', 1, 0), tile('c', 0, 1), tile('d', 1, 1)];
+    const next = placeTileWithDisplacement(tiles, 'a', { x: 0, y: 0, w: 2, h: 2 }, ctx);
+    expect(next.find((t) => t.instanceId === 'a')).toMatchObject({ x: 0, y: 0, w: 2, h: 2 });
+    expect(next).toHaveLength(4);
+    next.forEach((t) => expect(isAreaFree(next, t.x, t.y, t.w, t.h, t.instanceId)).toBe(true));
+    const bounds = sceneBounds(next);
+    expect(bounds.cols * bounds.rows).toBeGreaterThan(4);
+  });
+  it('empty slots under the grown camera are removed, cameras are kept', () => {
+    const tiles = [tile('a', 0, 0), { ...tile('s', 1, 0), type: 'slot' }, tile('b', 0, 1)];
+    const next = placeTileWithDisplacement(tiles, 'a', { x: 0, y: 0, w: 2, h: 1 }, ctx);
+    expect(next.map((t) => t.instanceId).sort()).toEqual(['a', 'b']);
+  });
+  it('tiles not covered stay where they are', () => {
+    const tiles = [tile('a', 0, 0), tile('b', 3, 0), tile('c', 1, 0)];
+    const next = placeTileWithDisplacement(tiles, 'a', { x: 0, y: 0, w: 1, h: 2 }, ctx);
+    expect(next.find((t) => t.instanceId === 'b')).toMatchObject({ x: 3, y: 0 });
+    expect(next.find((t) => t.instanceId === 'c')).toMatchObject({ x: 1, y: 0 });
   });
 });
