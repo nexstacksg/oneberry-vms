@@ -1793,3 +1793,66 @@
     color: #fff;
     font-weight: 600;
 }
+
+/* Smooth scene: tiles follow the pointer without lag, snap preview, eased zoom */
+.video-container.is-workspace-grid .live-workspace-tile.is-moving,
+.video-container.is-workspace-grid .live-workspace-tile.is-resizing {
+    transition: none !important;
+    z-index: 8;
+    will-change: transform, width, height;
+}
+
+.video-container.is-workspace-grid .live-workspace-tile.is-resizing {
+    cursor: nwse-resize;
+}
+
+.live-scene-snap-preview {
+    z-index: 1;
+    margin: calc(var(--tile-gap-px, 8px) / 2);
+    border: 2px dashed hsl(var(--primary));
+    border-radius: 0.5rem;
+    background: hsl(var(--primary) / 0.12);
+    pointer-events: none;
+    transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.live-scene-snap-preview.is-invalid {
+    border-color: hsl(0 84% 60%);
+    background: hsl(0 84% 60% / 0.12);
+}
+
+.live-scene-viewport .video-container.is-workspace-grid {
+    transition: transform 170ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    will-change: transform;
+}
+
+.live-scene-viewport.is-panning .video-container.is-workspace-grid {
+    transition: none;
+}
+
+/* Corner handles on the picture frame: L-shaped brackets, easy to grab */
+.live-tile-frame .live-workspace-resize-handle.is-ne,
+.live-tile-frame .live-workspace-resize-handle.is-se,
+.live-tile-frame .live-workspace-resize-handle.is-sw,
+.live-tile-frame .live-workspace-resize-handle.is-nw {
+    width: 1.5rem;
+    height: 1.5rem;
+    z-index: 36;
+}
+
+.live-tile-frame .live-workspace-resize-handle::after {
+    inset: 0.2rem;
+    border-radius: 0.15rem;
+    background: transparent;
+    border: 0 solid hsl(var(--primary));
+}
+
+.live-tile-frame .live-workspace-resize-handle.is-nw { top: -0.3rem; left: -0.3rem; cursor: nwse-resize; }
+.live-tile-frame .live-workspace-resize-handle.is-ne { top: -0.3rem; right: -0.3rem; left: auto; cursor: nesw-resize; }
+.live-tile-frame .live-workspace-resize-handle.is-sw { bottom: -0.3rem; left: -0.3rem; top: auto; cursor: nesw-resize; }
+.live-tile-frame .live-workspace-resize-handle.is-se { bottom: -0.3rem; right: -0.3rem; cursor: nwse-resize; }
+
+.live-tile-frame .live-workspace-resize-handle.is-nw::after { border-top-width: 3px; border-left-width: 3px; }
+.live-tile-frame .live-workspace-resize-handle.is-ne::after { border-top-width: 3px; border-right-width: 3px; }
+.live-tile-frame .live-workspace-resize-handle.is-sw::after { border-bottom-width: 3px; border-left-width: 3px; }
+.live-tile-frame .live-workspace-resize-handle.is-se::after { border-bottom-width: 3px; border-right-width: 3px; }
