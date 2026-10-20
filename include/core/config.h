@@ -22,6 +22,10 @@ typedef enum {
 } stream_protocol_t;
 
 // Stream configuration structure
+// Cameras per Live View layout: Nx Witness allows 64 by default
+#define LIVE_LAYOUT_MAX_ITEMS_DEFAULT 64
+#define LIVE_LAYOUT_MAX_ITEMS_LIMIT 144
+
 typedef struct {
     char name[MAX_STREAM_NAME];
     char url[MAX_URL_LENGTH];
@@ -187,6 +191,7 @@ typedef struct {
     int onvif_discovery_interval;    // Interval in seconds between discovery attempts
     char onvif_discovery_network[64]; // Network to scan for ONVIF devices (e.g., "192.168.1.0/24")
     char onvif_discovery_ignored[1024]; // Comma-separated device addresses hidden from discovery results
+    int live_layout_max_items;          // Most cameras one Live View layout can hold (Nx Witness default 64)
     
     // Stream settings
     int max_streams;            // Current allocated stream config slots. Grows with database/runtime needs.

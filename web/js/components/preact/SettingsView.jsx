@@ -47,6 +47,7 @@ export function SettingsView() {
     authTimeoutHours: '24',
     authAbsoluteTimeoutHours: '168',
     trustedDeviceDays: '30',
+    liveLayoutMaxItems: '64',
     trustedProxyCidrs: '',
     // Security settings
     forceMfaOnLogin: false,
@@ -269,6 +270,7 @@ export function SettingsView() {
         authTimeoutHours: settingsData.auth_timeout_hours?.toString() || '24',
         authAbsoluteTimeoutHours: settingsData.auth_absolute_timeout_hours?.toString() || '168',
         trustedDeviceDays: settingsData.trusted_device_days?.toString() || '30',
+        liveLayoutMaxItems: settingsData.live_layout_max_items?.toString() || '64',
         trustedProxyCidrs: settingsData.trusted_proxy_cidrs || '',
         // Security settings
         forceMfaOnLogin: settingsData.force_mfa_on_login || false,
@@ -365,6 +367,7 @@ export function SettingsView() {
       auth_timeout_hours: parseInt(settings.authTimeoutHours, 10),
       auth_absolute_timeout_hours: parseInt(settings.authAbsoluteTimeoutHours, 10),
       trusted_device_days: parseInt(settings.trustedDeviceDays, 10),
+      live_layout_max_items: Math.min(144, Math.max(1, parseInt(settings.liveLayoutMaxItems, 10) || 64)),
       trusted_proxy_cidrs: settings.trustedProxyCidrs,
       // Security settings
       force_mfa_on_login: settings.forceMfaOnLogin,
@@ -778,6 +781,23 @@ export function SettingsView() {
           
           <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4">
           <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.webInterface')}</h3>
+          <div class="setting grid grid-cols-1 md:grid-cols-3 gap-4 items-center mb-4">
+            <label for="setting-live-layout-max-items" class="font-medium">Cameras per layout</label>
+            <div class="col-span-2">
+              <input
+                type="number"
+                id="setting-live-layout-max-items"
+                name="liveLayoutMaxItems"
+                min="1"
+                max="144"
+                class="p-2 border border-input rounded bg-background text-foreground w-full max-w-md disabled:opacity-60 disabled:cursor-not-allowed"
+                value={settings.liveLayoutMaxItems}
+                onChange={handleInputChange}
+                disabled={!canModifySettings}
+              />
+              <span class="hint text-sm text-muted-foreground block mt-1">Most cameras one Live View layout can hold (1-144, default 64). More cameras use more of each viewer's CPU and network.</span>
+            </div>
+          </div>
           {restartNotice && (
             <div class="mb-4 rounded border border-yellow-300 bg-yellow-50 dark:bg-yellow-900/20 px-4 py-3 text-sm text-yellow-900 dark:text-yellow-100">
               <strong>{t('settings.pendingRestartLabel')}</strong> {restartNotice}

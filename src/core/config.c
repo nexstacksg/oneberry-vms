@@ -434,6 +434,7 @@ void load_default_config(config_t *config) {
     config->onvif_discovery_interval = 300;   // 5 minutes between scans
     snprintf(config->onvif_discovery_network, sizeof(config->onvif_discovery_network), "auto");
     config->onvif_discovery_ignored[0] = '\0';
+    config->live_layout_max_items = LIVE_LAYOUT_MAX_ITEMS_DEFAULT;
 
     // Initialize default values for detection-based recording in streams
     for (int i = 0; i < config->max_streams; i++) {
@@ -751,7 +752,11 @@ static int config_ini_handler(void* user, const char* section, const char* name,
     }
     // Web server settings
     else if (strcmp(section, "web") == 0) {
-        if (strcmp(name, "port") == 0) {
+        if (strcmp(name, "live_layout_max_items") == 0) {
+            int max_items = safe_atoi(value, LIVE_LAYOUT_MAX_ITEMS_DEFAULT);
+            config->live_layout_max_items = max_items < 1 ? 1 :
+                (max_items > LIVE_LAYOUT_MAX_ITEMS_LIMIT ? LIVE_LAYOUT_MAX_ITEMS_LIMIT : max_items);
+        } else if (strcmp(name, "port") == 0) {
             config->web_port = safe_atoi(value, 0);
         } else if (strcmp(name, "root") == 0) {
             strncpy(config->web_root, value, MAX_PATH_LENGTH - 1);
@@ -1761,6 +1766,8 @@ int save_config(const config_t *config, const char *path) {
     fprintf(file, "root = %s\n", config->web_root);
     fprintf(file, "auth_enabled = %s\n", config->web_auth_enabled ? "true" : "false");
     fprintf(file, "username = %s\n", config->web_username);
+    fprintf(file, "live_layout_max_items = %d  ; most cameras on one Live View layout (1-%d)\n",
+            config->live_layout_max_items, LIVE_LAYOUT_MAX_ITEMS_LIMIT);
     // Note: web_password is no longer saved to config - user passwords are managed in the database
     fprintf(file, "webrtc_disabled = %s\n", config->webrtc_disabled ? "true" : "false");
     fprintf(file, "auth_timeout_hours = %d  ; Session idle timeout in hours (default: 24)\n", config->auth_timeout_hours);

@@ -840,6 +840,25 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   );
   const cameraDisplay = cameraDisplayData?.cameras || {};
 
+  // Most cameras one layout may hold (Settings > Web Interface; Nx Witness default 64)
+  const { data: liveSettingsData } = useQuery(
+    ['settings'],
+    '/api/settings',
+    {
+      timeout: 10000,
+      retries: 1,
+      retryDelay: 1000
+    }
+  );
+  const layoutMaxItems = Math.max(1, Number(liveSettingsData?.live_layout_max_items) || 64);
+  const layoutMaxItemsRef = useRef(layoutMaxItems);
+  layoutMaxItemsRef.current = layoutMaxItems;
+  const showLayoutFullMessage = () => showStatusMessage(
+    `A layout can hold at most ${layoutMaxItemsRef.current} cameras. An admin can change this in Settings (Cameras per layout).`,
+    'error',
+    6000
+  );
+
   const setTileItemQuality = useCallback((tileInstanceId, cameraName, quality) => {
     const nextQuality = normalizeItemQuality(quality);
     if (tileInstanceId) {
@@ -1276,6 +1295,11 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     workspaceAutoExpandedDropRef.current = false;
     setWorkspaceStarted(true);
     setWorkspaceTiles((previousTiles) => {
+      const cameraTileCount = previousTiles.filter((tile) => tile.type !== 'slot' && tile.cameraId).length;
+      if (cameraTileCount >= layoutMaxItemsRef.current) {
+        window.setTimeout(showLayoutFullMessage, 0);
+        return previousTiles;
+      }
       const candidateTile = createWorkspaceTile(cameraId);
       const targetSlot = previousTiles.find((tile) => {
         if (tile.type !== 'slot') return false;
@@ -1367,6 +1391,10 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       .filter(Boolean)
       .filter((cameraName, index, list) => list.indexOf(cameraName) === index)
       .filter((cameraName) => streamByName.has(cameraName));
+    if (availableCameraNames.length > layoutMaxItemsRef.current) {
+      availableCameraNames.length = layoutMaxItemsRef.current;
+      window.setTimeout(showLayoutFullMessage, 0);
+    }
 
     if (availableCameraNames.length === 0) {
       if (streamByName.size === 0) {

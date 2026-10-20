@@ -532,6 +532,12 @@ static cJSON *normalize_live_layouts_json(cJSON *input, const user_t *user, bool
                 int h = clamp_layout_int(cJSON_GetObjectItem(tile_json, "h"), 1, 1, LIVE_LAYOUT_GRID_MAX_SIDE);
 
                 int tiles_before = cJSON_GetArraySize(tiles);
+                if (tiles_before >= g_config.live_layout_max_items) {
+                    cJSON_Delete(layout);
+                    cJSON_Delete(normalized);
+                    snprintf(error, error_size, "A layout can hold at most %d cameras", g_config.live_layout_max_items);
+                    return NULL;
+                }
                 if (!add_normalized_layout_tile(tiles, cameras, allowed_cameras, tile_id, camera_name, x, y, w, h, error, error_size)) {
                     cJSON_Delete(layout);
                     cJSON_Delete(normalized);
@@ -1270,6 +1276,7 @@ void handle_get_settings(const http_request_t *req, http_response_t *res) {
     cJSON_AddNumberToObject(settings, "onvif_discovery_interval", g_config.onvif_discovery_interval);
     cJSON_AddStringToObject(settings, "onvif_discovery_network", g_config.onvif_discovery_network);
     cJSON_AddStringToObject(settings, "onvif_discovery_ignored", g_config.onvif_discovery_ignored);
+    cJSON_AddNumberToObject(settings, "live_layout_max_items", g_config.live_layout_max_items);
 
     // Convert to string
     char *json_str = cJSON_PrintUnformatted(settings);
@@ -2083,6 +2090,20 @@ void handle_post_settings(const http_request_t *req, http_response_t *res) {
         g_config.onvif_discovery_ignored[out] = '\0';
         settings_changed = true;
         log_info("Updated onvif_discovery_ignored: %s", g_config.onvif_discovery_ignored);
+    }
+
+    // Most cameras on one Live View layout
+    cJSON *live_layout_max_items = cJSON_GetObjectItem(settings, "live_layout_max_items");
+    if (live_layout_max_items && cJSON_IsNumber(live_layout_max_items)) {
+        int value = live_layout_max_items->valueint;
+        if (value < 1 || value > LIVE_LAYOUT_MAX_ITEMS_LIMIT) {
+            cJSON_Delete(settings);
+            http_response_set_json_error(res, 400, "Cameras per layout must be between 1 and 144");
+            return;
+        }
+        g_config.live_layout_max_items = value;
+        settings_changed = true;
+        log_info("Updated live_layout_max_items: %d", value);
     }
 
     cJSON *db_backup_interval_minutes = cJSON_GetObjectItem(settings, "db_backup_interval_minutes");
