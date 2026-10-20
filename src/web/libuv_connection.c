@@ -241,8 +241,22 @@ void libuv_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
             new_size = LIBUV_RECV_BUFFER_MAX;
         }
         if (new_size > conn->recv_buffer_size) {
+            // The request body points into this buffer (see on_body); keep it
+            // pointing at the same bytes if realloc moves the buffer, or bodies
+            // larger than the first buffer are read from freed memory.
+            char *old_buf = conn->recv_buffer;
+            size_t body_offset = 0;
+            bool body_in_buffer = conn->request.body &&
+                (char *)conn->request.body >= old_buf &&
+                (char *)conn->request.body < old_buf + conn->recv_buffer_size;
+            if (body_in_buffer) {
+                body_offset = (size_t)((char *)conn->request.body - old_buf);
+            }
             char *new_buf = safe_realloc(conn->recv_buffer, new_size);
             if (new_buf) {
+                if (body_in_buffer) {
+                    conn->request.body = new_buf + body_offset;
+                }
                 conn->recv_buffer = new_buf;
                 conn->recv_buffer_size = new_size;
                 available = new_size - conn->recv_buffer_used;
