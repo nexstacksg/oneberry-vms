@@ -31,8 +31,6 @@ import {
   normalizeSceneOrigin,
   packSceneTiles,
   placeTileOnFreeCells,
-  placeTileWithDisplacement,
-  isRectFreeOfCameras,
   CELL_SPACING_OPTIONS,
   CELL_SPACING_PX,
   stepCellSpacing,
@@ -620,11 +618,14 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const backgroundInputRef = useRef(null);
   // Tile being dragged, and the tile or empty slot it would swap with
   const [movingTileId, setMovingTileId] = useState('');
+  // Selected cameras in the layout (click, Ctrl+click, Ctrl+A) and the right-click menu
+  const [selectedTileIds, setSelectedTileIds] = useState([]);
+  const [tileContextMenu, setTileContextMenu] = useState(null);
+  const lastPointerDraggedRef = useRef(false);
   const [resizingTileId, setResizingTileId] = useState('');
   // Cells a dragged/resized tile will snap to when released
   const [snapPreview, setSnapPreview] = useState(null);
   // Cameras a resize will move aside (dimmed until release)
-  const [displacedTileIds, setDisplacedTileIds] = useState([]);
   // Where tiles were on screen just before a change, so they can glide to their new place
   const flipFromRef = useRef(null);
   // Scene zoom and pan (mouse wheel / drag on empty space), like Nx Witness
@@ -1512,6 +1513,99 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     removeTimeoutsRef.current.set(instanceId, timeoutId);
   }, [workspaceAutoGrid, workspaceLocked]);
 
+  const removeSelectedTiles = useCallback((instanceIds) => {
+    setTileContextMenu(null);
+    if (workspaceLocked) {
+      showStatusMessage('Click Edit Layout before changing this saved layout', 'error', 5000);
+      return;
+    }
+    instanceIds.forEach((instanceId) => removeWorkspaceTile(instanceId));
+    setSelectedTileIds([]);
+  }, [removeWorkspaceTile, workspaceLocked]);
+
+  const selectTileFromClick = useCallback((event, instanceId) => {
+    if (lastPointerDraggedRef.current) return;
+    if (event.target?.closest?.('button, input, select, textarea, a, .stream-controls, .live-workspace-resize-handle')) return;
+    const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+    setSelectedTileIds((previousIds) => {
+      if (!additive) return [instanceId];
+      return previousIds.includes(instanceId)
+        ? previousIds.filter((id) => id !== instanceId)
+        : [...previousIds, instanceId];
+    });
+  }, []);
+
+  const openTileContextMenu = useCallback((event, instanceId) => {
+    event.preventDefault();
+    event.stopPropagation();
+    // Right-click on a camera outside the selection selects just that camera
+    let ids = selectedTileIds;
+    if (!ids.includes(instanceId)) {
+      ids = (event.ctrlKey || event.metaKey) ? [...ids, instanceId] : [instanceId];
+      setSelectedTileIds(ids);
+    }
+    const menuWidth = 208;
+    const menuHeight = 96;
+    setTileContextMenu({
+      x: Math.min(event.clientX, window.innerWidth - menuWidth - 8),
+      y: Math.min(event.clientY, window.innerHeight - menuHeight - 8),
+      ids,
+    });
+  }, [selectedTileIds]);
+
+  // Forget selected cameras that are no longer in the layout
+  useEffect(() => {
+    setSelectedTileIds((previousIds) => {
+      const nextIds = previousIds.filter((id) => workspaceTiles.some((tile) => tile.instanceId === id && tile.type !== 'slot'));
+      return nextIds.length === previousIds.length ? previousIds : nextIds;
+    });
+  }, [workspaceTiles]);
+
+  // Ctrl+A selects every camera in the layout, Delete removes the selection, Esc clears it
+  useEffect(() => {
+    if (!workspaceStarted) return undefined;
+    const handleKeyDown = (event) => {
+      const target = event.target;
+      if (target?.closest?.('input, textarea, select, [contenteditable="true"], [role="dialog"], .modal')) return;
+      if (document.fullscreenElement) return;
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'a') {
+        const cameraIds = workspaceTilesRef.current
+          .filter((tile) => tile.type !== 'slot')
+          .map((tile) => tile.instanceId);
+        if (cameraIds.length === 0) return;
+        event.preventDefault();
+        setSelectedTileIds(cameraIds);
+      } else if ((event.key === 'Delete' || event.key === 'Backspace') && selectedTileIds.length > 0) {
+        event.preventDefault();
+        removeSelectedTiles(selectedTileIds);
+      } else if (event.key === 'Escape') {
+        setTileContextMenu(null);
+        setSelectedTileIds([]);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [removeSelectedTiles, selectedTileIds, workspaceStarted]);
+
+  // Close the camera menu on any click elsewhere, scroll or window resize
+  useEffect(() => {
+    if (!tileContextMenu) return undefined;
+    const close = (event) => {
+      if (event?.target?.closest?.('.live-tile-context-menu')) return;
+      setTileContextMenu(null);
+    };
+    window.addEventListener('pointerdown', close, true);
+    window.addEventListener('wheel', close, true);
+    window.addEventListener('resize', close);
+    window.addEventListener('blur', close);
+    return () => {
+      window.removeEventListener('pointerdown', close, true);
+      window.removeEventListener('wheel', close, true);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('blur', close);
+    };
+  }, [tileContextMenu]);
+
   const getWorkspaceCellSize = useCallback(() => {
     const grid = workspaceGridRef.current;
     if (!grid) return { width: 1, height: 1 };
@@ -1532,6 +1626,9 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     if (!state) return;
 
     event.preventDefault();
+    if (Math.abs(event.clientX - state.startX) + Math.abs(event.clientY - state.startY) > 4) {
+      lastPointerDraggedRef.current = true;
+    }
     const zoom = sceneZoomRef.current.scale || 1;
     const dx = (event.clientX - state.startX) / zoom;
     const dy = (event.clientY - state.startY) / zoom;
@@ -1584,38 +1681,33 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         Math.floor(SCENE_MAX_SIDE / Math.max(base.w, base.h)),
         Math.round(Math.max((width + state.tileGap) / state.cellW / base.w, (height + state.tileGap) / state.cellH / base.h))
       ));
-      const w = base.w * steps;
-      const h = base.h * steps;
-      target = {
-        x: growsLeft ? start.x + start.w - w : start.x,
-        y: growsUp ? start.y + start.h - h : start.y,
-        w,
-        h,
+      // Only free cells (Nx Witness): grow as far as free cells allow, never over another camera
+      const rectFor = (count) => {
+        const w = base.w * count;
+        const h = base.h * count;
+        return {
+          x: growsLeft ? start.x + start.w - w : start.x,
+          y: growsUp ? start.y + start.h - h : start.y,
+          w,
+          h,
+        };
       };
+      let fitted = steps;
+      while (fitted > 1 && !placeTileOnFreeCells(tiles, state.instanceId, rectFor(fitted))) fitted -= 1;
+      target = rectFor(fitted);
+      target.valid = Boolean(placeTileOnFreeCells(tiles, state.instanceId, target));
+      // Asked for more than fits: other cameras are in the way
+      target.blocked = fitted < steps;
     }
 
     if (target.valid === undefined) {
       const rect = { x: target.x, y: target.y, w: target.w, h: target.h };
-      if (state.mode === 'resize') {
-        // Free cells: green. Cells of another camera: orange, that camera moves aside on release.
-        target.valid = true;
-        target.displaces = !isRectFreeOfCameras(tiles, rect, state.instanceId);
-        const covered = target.displaces
-          ? tiles.filter((tile) => tile.instanceId !== state.instanceId && tile.type !== 'slot' &&
-            !isRectFreeOfCameras([tile], rect)).map((tile) => tile.instanceId)
-          : [];
-        if (covered.join() !== (state.displaced || []).join()) {
-          state.displaced = covered;
-          setDisplacedTileIds(covered);
-        }
-      } else {
-        // Moving: only free cells (green); cells used by another camera are red
-        target.valid = Boolean(placeTileOnFreeCells(tiles, state.instanceId, rect));
-      }
+      // Moving: only free cells (green); cells used by another camera are red
+      target.valid = Boolean(placeTileOnFreeCells(tiles, state.instanceId, rect));
     }
     const previous = state.target;
     if (!previous || previous.x !== target.x || previous.y !== target.y || previous.w !== target.w ||
-        previous.h !== target.h || previous.valid !== target.valid || previous.displaces !== target.displaces) {
+        previous.h !== target.h || previous.valid !== target.valid || previous.blocked !== target.blocked) {
       state.target = target;
       setSnapPreview(target);
     }
@@ -1638,14 +1730,6 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       if (state.mode === 'move' && state.dropTargetId) {
         const { instanceId, dropTargetId } = state;
         setWorkspaceTiles((previousTiles) => normalizeSceneOrigin(swapTilePlaces(previousTiles, instanceId, dropTargetId)));
-      } else if (target?.valid && state.mode === 'resize') {
-        setWorkspaceAutoGrid(false);
-        setWorkspaceTiles((previousTiles) => placeTileWithDisplacement(
-          previousTiles,
-          state.instanceId,
-          { x: target.x, y: target.y, w: target.w, h: target.h },
-          sceneContext
-        ));
       } else if (target?.valid) {
         setWorkspaceAutoGrid(false);
         setWorkspaceTiles((previousTiles) => placeTileOnFreeCells(
@@ -1663,7 +1747,6 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setTileDropTargetId('');
     setSnapPreview(null);
     setGridOverlay(null);
-    setDisplacedTileIds([]);
     document.body.classList.remove('is-scene-resizing-nwse', 'is-scene-resizing-nesw');
     workspacePointerRef.current = null;
     window.removeEventListener('pointermove', handleWorkspacePointerMove);
@@ -1672,6 +1755,9 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   }, [captureTileRects, handleWorkspacePointerMove]);
 
   const startWorkspacePointer = useCallback((event, tile, mode = 'move', edges = '') => {
+    lastPointerDraggedRef.current = false;
+    // Only the main button moves or resizes; right-click opens the camera menu
+    if (event.button !== undefined && event.button !== 0) return;
     if (!workspaceStarted || !tile) return;
     if (workspaceLocked) return;
     if (isMobileViewport) return;
@@ -2989,10 +3075,53 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
             </div>
           </div>
         )}
+        {tileContextMenu && (
+          <div
+            className="sidebar-camera-context-menu live-tile-context-menu"
+            role="menu"
+            data-testid="tile-context-menu"
+            style={{ left: `${tileContextMenu.x}px`, top: `${tileContextMenu.y}px` }}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <div className="sidebar-camera-context-title">
+              {tileContextMenu.ids.length === 1
+                ? (workspaceTiles.find((tile) => tile.instanceId === tileContextMenu.ids[0])?.cameraId || '1 camera selected')
+                : `${tileContextMenu.ids.length} cameras selected`}
+            </div>
+            <button
+              type="button"
+              role="menuitem"
+              className="is-danger"
+              data-testid="tile-context-remove"
+              disabled={workspaceLocked}
+              title={workspaceLocked ? 'Click Edit Layout to change this saved layout' : undefined}
+              onClick={() => removeSelectedTiles(tileContextMenu.ids)}
+            >
+              {tileContextMenu.ids.length === 1 ? 'Remove from layout' : `Remove ${tileContextMenu.ids.length} cameras from layout`}
+            </button>
+            {tileContextMenu.ids.length < workspaceTiles.filter((tile) => tile.type !== 'slot').length && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setSelectedTileIds(workspaceTiles.filter((tile) => tile.type !== 'slot').map((tile) => tile.instanceId));
+                  setTileContextMenu(null);
+                }}
+              >
+                Select all
+                <span style={{ marginLeft: 'auto', opacity: 0.6, fontWeight: 500 }}>Ctrl+A</span>
+              </button>
+            )}
+          </div>
+        )}
         <div
           ref={sceneViewportRef}
           className={`live-scene-viewport ${isWorkspaceMode && sceneZoom.scale > 1.001 ? 'is-zoomed' : ''} ${gridOverlay ? 'is-editing-scene' : ''}`}
           onPointerDown={(event) => {
+            // Click on empty space clears the selected cameras
+            if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.target.closest('.live-workspace-tile')) {
+              setSelectedTileIds((previousIds) => (previousIds.length ? [] : previousIds));
+            }
             // Drag empty space to move around a zoomed scene
             if (!isWorkspaceMode || sceneZoomRef.current.scale <= 1.001 || event.button !== 0) return;
             if (event.target.closest('.live-workspace-tile, .live-workspace-slot, button, input, select, textarea')) return;
@@ -3034,7 +3163,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         {isWorkspaceMode && gridOverlay && snapPreview && (
           // Cells the camera will take: green where it can go, red where it cannot (Nx Witness)
           <div
-            className={`live-scene-snap-preview ${snapPreview.valid ? '' : 'is-invalid'} ${snapPreview.valid && snapPreview.displaces ? 'is-displacing' : ''}`}
+            className={`live-scene-snap-preview ${snapPreview.valid ? '' : 'is-invalid'} ${snapPreview.valid && snapPreview.blocked ? 'is-blocked' : ''}`}
             aria-hidden="true"
             data-testid="scene-snap-preview"
             data-cells={`${snapPreview.x},${snapPreview.y},${snapPreview.w},${snapPreview.h}`}
@@ -3209,7 +3338,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                     key={tileInstanceId || stream.name}
                     data-tile-id={tileInstanceId || undefined}
                     title={stream.name}
-                    className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && resizingTileId === tileInstanceId ? 'is-resizing' : ''} ${tileInstanceId && displacedTileIds.includes(tileInstanceId) ? 'is-displaced' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
+                    className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && selectedTileIds.includes(tileInstanceId) ? 'is-selected' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && resizingTileId === tileInstanceId ? 'is-resizing' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
                     style={{
                       position: 'relative',
                       ...(isSingleCameraActiveTile ? {
@@ -3226,6 +3355,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                     onDrop={!isWorkspaceMode && reorderMode ? handleDrop : undefined}
                     onDragEnd={!isWorkspaceMode && reorderMode ? handleDragEnd : undefined}
                     onPointerDown={!singleCameraMode && isWorkspaceMode && workspaceTile ? (event) => startWorkspacePointer(event, workspaceTile, 'move') : undefined}
+                    onClick={!singleCameraMode && isWorkspaceMode && tileInstanceId ? (event) => selectTileFromClick(event, tileInstanceId) : undefined}
+                    onContextMenu={!singleCameraMode && isWorkspaceMode && tileInstanceId ? (event) => openTileContextMenu(event, tileInstanceId) : undefined}
                   >
                     {!isWorkspaceMode && reorderMode && (
                       <div

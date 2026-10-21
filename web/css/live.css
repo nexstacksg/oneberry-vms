@@ -1857,11 +1857,6 @@
 .live-tile-frame .live-workspace-resize-handle.is-sw::after { border-bottom-width: 3px; border-left-width: 3px; }
 .live-tile-frame .live-workspace-resize-handle.is-se::after { border-bottom-width: 3px; border-right-width: 3px; }
 
-/* Cameras a resize will move aside */
-.video-container.is-workspace-grid .live-workspace-tile.is-displaced {
-    opacity: 0.45;
-    transform: scale(0.96);
-}
 
 /* Editing the scene (Nx Witness): grid lines over the whole view, green/red target cells */
 .live-scene-viewport {
@@ -1909,10 +1904,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-/* Resizing takes another camera's cells: it moves aside on release */
-.live-scene-viewport > .live-scene-snap-preview.is-displacing {
-    border-color: hsl(32 95% 50%);
-    background: hsl(32 95% 50% / 0.3);
+/* Resizing past free cells: the preview stops at the largest free size, edged red */
+.live-scene-viewport > .live-scene-snap-preview.is-blocked {
+    outline: 2px dashed hsl(0 84% 55%);
+    outline-offset: 2px;
 }
 
 /* Resize cursor everywhere while a corner is dragged */
@@ -2032,4 +2027,20 @@ body.is-scene-resizing-nesw * {
 .video-container.is-workspace-grid .live-workspace-tile .live-workspace-tile-close svg {
     width: 60%;
     height: 60%;
+}
+
+/* Selected cameras (click, Ctrl+click, Ctrl+A) */
+.video-container.is-workspace-grid .live-workspace-tile.is-selected .live-tile-frame::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    border: 2px solid hsl(var(--primary));
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px hsl(0 0% 0% / 0.35);
+    pointer-events: none;
+}
+
+.live-tile-context-menu .is-danger {
+    color: hsl(0 72% 50%);
 }
