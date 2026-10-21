@@ -698,8 +698,9 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     const p = new URLSearchParams(window.location.search);
     const u = p.get('labels');
     if (u !== null) return u !== '0';
-    const stored = localStorage.getItem('lightnvr-show-labels');
-    return stored !== null ? stored === 'true' : true;
+    // Camera names are off by default (v2 key: earlier versions stored "on" for everyone)
+    const stored = localStorage.getItem('lightnvr-show-labels-v2');
+    return stored === 'true';
   });
   const [showControls, setShowControls] = useState(() => {
     const p = new URLSearchParams(window.location.search);
@@ -1083,7 +1084,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     // Persist to localStorage for sessions without URL
     if (tagFilter) localStorage.setItem(`lightnvr-${storagePrefix}-tag-filter`, tagFilter);
     else localStorage.removeItem(`lightnvr-${storagePrefix}-tag-filter`);
-    localStorage.setItem('lightnvr-show-labels', String(showLabels));
+    localStorage.setItem('lightnvr-show-labels-v2', String(showLabels));
     localStorage.setItem('lightnvr-show-controls', String(showControls));
     localStorage.setItem('lightnvr-show-detections', String(showDetections));
   }, [tagFilter, showLabels, showControls, showDetections, storagePrefix]);
@@ -3207,6 +3208,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                   <div
                     key={tileInstanceId || stream.name}
                     data-tile-id={tileInstanceId || undefined}
+                    title={stream.name}
                     className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && resizingTileId === tileInstanceId ? 'is-resizing' : ''} ${tileInstanceId && displacedTileIds.includes(tileInstanceId) ? 'is-displaced' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
                     style={{
                       position: 'relative',

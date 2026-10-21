@@ -1934,3 +1934,102 @@ body.is-scene-resizing-nesw * {
     width: 1.75rem;
     height: 1.75rem;
 }
+
+/* Camera buttons scale with the camera tile (container queries on the video cell) */
+.video-cell {
+    container-type: size;
+    container-name: camera-cell;
+}
+
+.video-cell .stream-controls:not(.stream-controls-fullscreen) {
+    right: clamp(4px, 1.4cqw, 10px) !important;
+    bottom: clamp(4px, 1.4cqw, 10px) !important;
+    gap: clamp(2px, 1cqw, 8px) !important;
+    padding: clamp(2px, 0.6cqw, 5px) !important;
+    border-radius: clamp(4px, 1cqw, 8px) !important;
+    max-width: calc(100% - 8px);
+    min-width: 0 !important;
+    align-items: center;
+}
+
+.video-cell .stream-controls:not(.stream-controls-fullscreen) > button,
+.video-cell .stream-controls:not(.stream-controls-fullscreen) > div:not(.stream-quality-selector),
+.video-cell .stream-controls:not(.stream-controls-fullscreen) > div:not(.stream-quality-selector) button {
+    padding: clamp(2px, 0.6cqw, 5px) !important;
+}
+
+.video-cell .stream-controls:not(.stream-controls-fullscreen) svg {
+    width: clamp(14px, 2.6cqw, 22px) !important;
+    height: clamp(14px, 2.6cqw, 22px) !important;
+}
+
+.video-cell .stream-controls:not(.stream-controls-fullscreen) .stream-quality-selector {
+    height: clamp(20px, 3.6cqw, 26px) !important;
+}
+
+.video-cell .stream-controls:not(.stream-controls-fullscreen) .stream-quality-selector button {
+    min-width: clamp(24px, 4.6cqw, 32px) !important;
+    height: clamp(16px, 3cqw, 22px) !important;
+    line-height: clamp(16px, 3cqw, 22px) !important;
+    padding: 0 clamp(3px, 0.8cqw, 6px) !important;
+    font-size: clamp(9px, 1.6cqw, 11px) !important;
+}
+
+/* Smaller tiles keep only the most used buttons */
+@container camera-cell (max-width: 560px) {
+    .stream-controls:not(.stream-controls-fullscreen) .privacy-btn,
+    .stream-controls:not(.stream-controls-fullscreen) .talk-mode-btn,
+    .stream-controls:not(.stream-controls-fullscreen) .timeline-btn {
+        display: none !important;
+    }
+}
+
+@container camera-cell (max-width: 420px) {
+    .stream-controls:not(.stream-controls-fullscreen) .snapshot-control,
+    .stream-controls:not(.stream-controls-fullscreen) .force-refresh-btn,
+    .stream-controls:not(.stream-controls-fullscreen) .detection-toggle-btn,
+    .stream-controls:not(.stream-controls-fullscreen) .ptz-toggle-btn,
+    .stream-controls:not(.stream-controls-fullscreen) .ptt-btn {
+        display: none !important;
+    }
+}
+
+@container camera-cell (max-width: 300px) {
+    .stream-controls:not(.stream-controls-fullscreen) .stream-quality-selector,
+    .stream-controls:not(.stream-controls-fullscreen) .audio-toggle-btn {
+        display: none !important;
+    }
+}
+
+/* Very small tiles: no button bar (double-click still opens fullscreen) */
+@container camera-cell (max-width: 170px) {
+    .stream-controls:not(.stream-controls-fullscreen) {
+        display: none !important;
+    }
+}
+
+@container camera-cell (max-height: 100px) {
+    .stream-controls:not(.stream-controls-fullscreen) {
+        display: none !important;
+    }
+}
+
+/* Remove button: only on the hovered camera, sized with the tile */
+.video-container.is-workspace-grid .live-workspace-tile .live-workspace-tile-close {
+    opacity: 0;
+    width: clamp(18px, 4.5cqw, 28px);
+    height: clamp(18px, 4.5cqw, 28px);
+    top: clamp(4px, 1.4cqw, 10px);
+    right: clamp(4px, 1.4cqw, 10px);
+    transition: opacity 140ms ease;
+}
+
+.video-container.is-workspace-grid .live-workspace-tile:hover .live-workspace-tile-close,
+.video-container.is-workspace-grid .live-workspace-tile:focus-within .live-workspace-tile-close {
+    opacity: 1;
+}
+
+.video-container.is-workspace-grid .live-workspace-tile .live-workspace-tile-close svg {
+    width: 60%;
+    height: 60%;
+}

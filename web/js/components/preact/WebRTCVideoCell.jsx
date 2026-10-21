@@ -2505,6 +2505,7 @@ export function WebRTCVideoCell({
         )}
         {showFullStreamControls && (
           <div
+            className="snapshot-control"
             style={{
               backgroundColor: 'transparent',
               padding: '5px',
@@ -2524,6 +2525,7 @@ export function WebRTCVideoCell({
         {showFullStreamControls && (
         <button
           type="button"
+          className="privacy-btn"
           title={t('live.pauseForPrivacy')}
           onClick={() => setShowPrivacyConfirm(true)}
           style={{
