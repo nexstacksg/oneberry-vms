@@ -4,7 +4,9 @@ import {
   isAreaFree,
   normalizeSceneOrigin,
   packSceneTiles,
+  placeTileOnFreeCells,
   placeTileWithDisplacement,
+  stepCellSpacing,
   sceneBounds,
   spanForAspect,
 } from '../js/utils/scene-layout.js';
@@ -109,5 +111,37 @@ describe('placeTileWithDisplacement (make a camera bigger, others make room)', (
     const next = placeTileWithDisplacement(tiles, 'a', { x: 0, y: 0, w: 1, h: 2 }, ctx);
     expect(next.find((t) => t.instanceId === 'b')).toMatchObject({ x: 3, y: 0 });
     expect(next.find((t) => t.instanceId === 'c')).toMatchObject({ x: 1, y: 0 });
+  });
+});
+
+describe('placeTileOnFreeCells (Nx Witness: only free cells, green; occupied red)', () => {
+  it('grows a camera into free cells', () => {
+    const tiles = [tile('a', 0, 0), tile('b', 1, 0)];
+    const next = placeTileOnFreeCells(tiles, 'a', { x: 0, y: 0, w: 1, h: 2 });
+    expect(next.find((t) => t.instanceId === 'a')).toMatchObject({ w: 1, h: 2 });
+  });
+  it('refuses cells used by another camera', () => {
+    const tiles = [tile('a', 0, 0), tile('b', 1, 0)];
+    expect(placeTileOnFreeCells(tiles, 'a', { x: 0, y: 0, w: 2, h: 1 })).toBeNull();
+  });
+  it('allows growing left/up outside the scene and moves the scene origin', () => {
+    const tiles = [tile('a', 0, 0), tile('b', 1, 0)];
+    const next = placeTileOnFreeCells(tiles, 'a', { x: -1, y: -1, w: 2, h: 2 });
+    expect(next.find((t) => t.instanceId === 'a')).toMatchObject({ x: 0, y: 0, w: 2, h: 2 });
+    expect(next.find((t) => t.instanceId === 'b')).toMatchObject({ x: 2, y: 1 });
+  });
+  it('empty slots under it are removed, not a reason to refuse', () => {
+    const tiles = [tile('a', 0, 0), { ...tile('s', 1, 0), type: 'slot' }];
+    const next = placeTileOnFreeCells(tiles, 'a', { x: 0, y: 0, w: 2, h: 1 });
+    expect(next.map((t) => t.instanceId)).toEqual(['a']);
+  });
+});
+
+describe('stepCellSpacing (Ctrl + mouse wheel)', () => {
+  it('steps through none/small/medium/large and stops at the ends', () => {
+    expect(stepCellSpacing('medium', 1)).toBe('large');
+    expect(stepCellSpacing('large', 1)).toBe('large');
+    expect(stepCellSpacing('small', -1)).toBe('none');
+    expect(stepCellSpacing('none', -1)).toBe('none');
   });
 });

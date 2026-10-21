@@ -1862,3 +1862,49 @@
     opacity: 0.45;
     transform: scale(0.96);
 }
+
+/* Editing the scene (Nx Witness): grid lines over the whole view, green/red target cells */
+.live-scene-viewport {
+    background:
+        linear-gradient(180deg, hsl(var(--muted) / 0.46), hsl(var(--background) / 0.92)),
+        hsl(var(--background));
+}
+
+.live-scene-viewport > .video-container.is-workspace-grid {
+    position: relative;
+    z-index: 1;
+}
+
+.live-scene-viewport.is-editing-scene > .video-container.is-workspace-grid {
+    background: transparent;
+}
+
+.live-scene-grid-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background-image:
+        linear-gradient(to right, hsl(var(--primary) / 0.45) 1px, transparent 1px),
+        linear-gradient(to bottom, hsl(var(--primary) / 0.45) 1px, transparent 1px);
+}
+
+.live-scene-viewport > .live-scene-snap-preview {
+    position: absolute;
+    z-index: 5;
+    margin: 0;
+    border: 2px solid hsl(142 71% 40%);
+    border-radius: 0.25rem;
+    background: hsl(142 71% 40% / 0.28);
+    pointer-events: none;
+    transition: left 90ms ease-out, top 90ms ease-out, width 90ms ease-out, height 90ms ease-out, background-color 120ms ease;
+}
+
+.live-scene-viewport > .live-scene-snap-preview.is-invalid {
+    border-color: hsl(0 84% 55%);
+    background: hsl(0 84% 55% / 0.3);
+}
+
+.live-workspace-menu-options.is-four {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}

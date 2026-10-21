@@ -541,6 +541,13 @@ static cJSON *normalize_live_layouts_json(cJSON *input, const user_t *user, bool
              strcmp(cell_aspect->valuestring, "9:16") == 0)) {
             cJSON_AddStringToObject(layout, "cellAspect", cell_aspect->valuestring);
         }
+        // Space between cameras (Nx Witness cell spacing)
+        const cJSON *cell_spacing = cJSON_GetObjectItem(input_layout, "cellSpacing");
+        if (cJSON_IsString(cell_spacing) &&
+            (strcmp(cell_spacing->valuestring, "none") == 0 || strcmp(cell_spacing->valuestring, "small") == 0 ||
+             strcmp(cell_spacing->valuestring, "medium") == 0 || strcmp(cell_spacing->valuestring, "large") == 0)) {
+            cJSON_AddStringToObject(layout, "cellSpacing", cell_spacing->valuestring);
+        }
         // Tile positions are in whole scene cells (older layouts used a 48-unit grid)
         const cJSON *units = cJSON_GetObjectItem(input_layout, "units");
         if (cJSON_IsString(units) && strcmp(units->valuestring, "cells") == 0) {

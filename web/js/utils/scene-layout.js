@@ -217,3 +217,48 @@ export function placeTileWithDisplacement(tiles, tileId, rect, context = {}) {
   const byId = new Map(result.map((tile) => [tile.instanceId, tile]));
   return normalizeSceneOrigin(tiles.filter((tile) => byId.has(tile.instanceId)).map((tile) => byId.get(tile.instanceId)));
 }
+
+/** True if no camera (empty slots do not count) overlaps the rectangle. */
+export function isRectFreeOfCameras(tiles, rect, ignoreId = '') {
+  return !(tiles || []).some((tile) => (
+    tile.instanceId !== ignoreId && tile.type !== 'slot' &&
+    rect.x < tile.x + tile.w && rect.x + rect.w > tile.x &&
+    rect.y < tile.y + tile.h && rect.y + rect.h > tile.y
+  ));
+}
+
+/**
+ * Put a tile on free cells (Nx Witness: only free cells are allowed; they show
+ * green, occupied ones red). The rectangle may lie outside the current scene,
+ * even left of or above it; the scene then grows. Empty slots underneath go away.
+ * Returns null when cameras are in the way or the scene would get too large.
+ */
+export function placeTileOnFreeCells(tiles, tileId, rect) {
+  const list = tiles || [];
+  const tile = list.find((item) => item.instanceId === tileId);
+  if (!tile || !isRectFreeOfCameras(list, rect, tileId)) return null;
+  const covers = (item) => (
+    rect.x < item.x + item.w && rect.x + rect.w > item.x &&
+    rect.y < item.y + item.h && rect.y + rect.h > item.y
+  );
+  const next = list
+    .filter((item) => item.instanceId === tileId || item.type !== 'slot' || !covers(item))
+    .map((item) => (item.instanceId === tileId ? { ...item, ...rect } : item));
+  const minX = Math.min(...next.map((item) => item.x));
+  const minY = Math.min(...next.map((item) => item.y));
+  const maxX = Math.max(...next.map((item) => item.x + item.w));
+  const maxY = Math.max(...next.map((item) => item.y + item.h));
+  if (maxX - minX > SCENE_MAX_SIDE || maxY - minY > SCENE_MAX_SIDE) return null;
+  return normalizeSceneOrigin(next);
+}
+
+// Space between cameras (Nx Witness "Cell Spacing"), in pixels
+export const CELL_SPACING_OPTIONS = ['none', 'small', 'medium', 'large'];
+export const CELL_SPACING_PX = { none: 0, small: 4, medium: 8, large: 16 };
+
+/** One step more (+1) or less (-1) spacing, as Ctrl + mouse wheel does. */
+export function stepCellSpacing(current, direction) {
+  const index = Math.max(0, CELL_SPACING_OPTIONS.indexOf(current));
+  const next = Math.max(0, Math.min(CELL_SPACING_OPTIONS.length - 1, index + (direction > 0 ? 1 : -1)));
+  return CELL_SPACING_OPTIONS[next];
+}

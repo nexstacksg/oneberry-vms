@@ -30,7 +30,10 @@ import {
   isAreaFree,
   normalizeSceneOrigin,
   packSceneTiles,
-  placeTileWithDisplacement,
+  placeTileOnFreeCells,
+  CELL_SPACING_OPTIONS,
+  CELL_SPACING_PX,
+  stepCellSpacing,
   sceneBounds,
   spanForAspect,
 } from '../../utils/scene-layout.js';
@@ -45,6 +48,10 @@ import {
 
 // Cell shape of the unsaved workspace (saved layouts keep their own)
 const LIVE_CELL_ASPECT_STORAGE_KEY = 'lightnvr-live-cell-aspect';
+const LIVE_CELL_SPACING_STORAGE_KEY = 'lightnvr-live-cell-spacing';
+// Mouse wheel zoom range: below 1 shows free grid around the cameras (Nx Witness)
+const SCENE_MIN_ZOOM = 0.4;
+const SCENE_MAX_ZOOM = 6;
 // Live View scene (Nx Witness style): tiles sit in whole cells and the scene is
 // as large as they need; these are the most it may grow to in each direction.
 const WORKSPACE_GRID_COLS = SCENE_MAX_SIDE;
@@ -184,9 +191,13 @@ function getGridContentRect(grid, zoom = 1) {
 
 // Keep a zoomed scene covering the viewport (no empty space dragged in)
 function clampSceneZoom(zoom, viewport) {
-  if (!viewport || zoom.scale <= 1) return { scale: 1, x: 0, y: 0 };
+  if (!viewport || zoom.scale === 1) return { scale: 1, x: 0, y: 0 };
   const width = viewport.clientWidth;
   const height = viewport.clientHeight;
+  if (zoom.scale < 1) {
+    // Zoomed out: the whole scene is centred with free grid around it
+    return { scale: zoom.scale, x: (width - width * zoom.scale) / 2, y: (height - height * zoom.scale) / 2 };
+  }
   return {
     scale: zoom.scale,
     x: Math.min(0, Math.max(width - width * zoom.scale, zoom.x)),
@@ -247,6 +258,7 @@ function normalizeLiveLayouts(data = {}) {
             cols: Number.isFinite(Number(layout.cols)) ? Math.max(1, Math.floor(Number(layout.cols))) : undefined,
             cellAspect: CELL_ASPECT_OPTIONS.includes(layout.cellAspect) ? layout.cellAspect : 'auto',
             units: layout.units === 'cells' ? 'cells' : undefined,
+            cellSpacing: CELL_SPACING_OPTIONS.includes(layout.cellSpacing) ? layout.cellSpacing : undefined,
             rows: Number.isFinite(Number(layout.rows)) ? Math.max(1, Math.floor(Number(layout.rows))) : undefined,
             tiles,
             slots,
@@ -578,6 +590,17 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       return 'auto';
     }
   });
+  // Space between cameras (Nx Witness "Cell Spacing"; Ctrl + mouse wheel)
+  const [layoutCellSpacing, setLayoutCellSpacing] = useState(() => {
+    try {
+      const stored = localStorage.getItem(LIVE_CELL_SPACING_STORAGE_KEY);
+      return CELL_SPACING_OPTIONS.includes(stored) ? stored : 'medium';
+    } catch {
+      return 'medium';
+    }
+  });
+  // Grid lines drawn over the whole view while a camera is moved or resized
+  const [gridOverlay, setGridOverlay] = useState(null);
   // Picture shape each camera actually sends, reported by the video cells
   const [videoAspectByCamera, setVideoAspectByCamera] = useState({});
   // Item resolution per camera for the classic grid (layout tiles keep their own)
@@ -598,8 +621,6 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const [resizingTileId, setResizingTileId] = useState('');
   // Cells a dragged/resized tile will snap to when released
   const [snapPreview, setSnapPreview] = useState(null);
-  // Cameras a resize will push aside (shown dimmed until release)
-  const [displacedTileIds, setDisplacedTileIds] = useState([]);
   // Where tiles were on screen just before a change, so they can glide to their new place
   const flipFromRef = useRef(null);
   // Scene zoom and pan (mouse wheel / drag on empty space), like Nx Witness
@@ -636,6 +657,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const workspacePointerRef = useRef(null);
   const workspaceTilesRef = useRef([]);
   const cameraSpanRef = useRef(() => ({ w: 1, h: 1 }));
+  const workspaceLockedRef = useRef(false);
+  const wheelSpacingAtRef = useRef(0);
   const workspaceAutoExpandedDropRef = useRef(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [layoutPresetMenuOpen, setLayoutPresetMenuOpen] = useState(false);
@@ -1105,6 +1128,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const isSharedLayout = Boolean(activeLayout?.sharedWithMe);
   const isLockedLayout = Boolean(activeLayout?.locked);
   const workspaceLocked = singleCameraMode || (Boolean(activeLayoutId) && (!layoutEditMode || isSharedLayout || isLockedLayout));
+  workspaceLockedRef.current = workspaceLocked;
 
   const captureCurrentLayoutState = useCallback(() => ({
     selectedLayoutId: activeLayoutId,
@@ -1247,6 +1271,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setWorkspaceStarted(true);
     setWorkspaceAutoGrid(tiles.length === 0 && slots.length === 0);
     setLayoutCellAspect(activeLayout.cellAspect || 'auto');
+    setLayoutCellSpacing(activeLayout.cellSpacing || 'medium');
     setLayoutEditMode(false);
     setCurrentPage(0);
 
@@ -1256,6 +1281,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       id: activeLayout.id,
       units: 'cells',
       cellAspect: activeLayout.cellAspect || 'auto',
+      cellSpacing: activeLayout.cellSpacing || 'medium',
       tiles: serializedTiles,
       slots: serializedSlots,
     });
@@ -1509,9 +1535,14 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     let target;
 
     if (state.mode === 'move') {
-      // The tile follows the pointer; over another tile or empty slot it swaps (Nx Witness style)
+      // The tile follows the pointer; over another camera it swaps (Nx Witness style)
       element.style.transform = `translate(${dx}px, ${dy}px)`;
-      const dropTarget = findTileAtPoint(tiles, getWorkspaceGridPoint(event), state.instanceId);
+      const pointerCell = {
+        x: Math.floor((event.clientX - state.contentLeft) / (state.cellW * state.zoom)),
+        y: Math.floor((event.clientY - state.contentTop) / (state.cellH * state.zoom)),
+      };
+      const overTile = findTileAtPoint(tiles, pointerCell, state.instanceId);
+      const dropTarget = overTile && overTile.type !== 'slot' ? overTile : null;
       const dropTargetId = dropTarget?.instanceId || '';
       if (dropTargetId !== state.dropTargetId) {
         state.dropTargetId = dropTargetId;
@@ -1520,8 +1551,9 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       target = dropTarget
         ? { x: dropTarget.x, y: dropTarget.y, w: dropTarget.w, h: dropTarget.h, valid: true }
         : {
-          x: Math.max(0, start.x + Math.round(dx / state.cellW)),
-          y: Math.max(0, start.y + Math.round(dy / state.cellH)),
+          // Free cells anywhere on the grid, also outside the current scene
+          x: start.x + Math.round(dx / state.cellW),
+          y: start.y + Math.round(dy / state.cellH),
           w: start.w,
           h: start.h,
         };
@@ -1538,8 +1570,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       element.style.justifySelf = 'start';
       element.style.alignSelf = 'start';
       element.style.transform = `translate(${growsLeft ? state.startWidth - width : 0}px, ${growsUp ? state.startHeight - height : 0}px)`;
-      const w = Math.max(1, Math.min(SCENE_MAX_SIDE, Math.round((width + state.tileGap) / state.cellW)));
-      const h = Math.max(1, Math.min(SCENE_MAX_SIDE, Math.round((height + state.tileGap) / state.cellH)));
+      const w = Math.max(1, Math.round((width + state.tileGap) / state.cellW));
+      const h = Math.max(1, Math.round((height + state.tileGap) / state.cellH));
       target = {
         x: growsLeft ? start.x + start.w - w : start.x,
         y: growsUp ? start.y + start.h - h : start.y,
@@ -1549,22 +1581,10 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     }
 
     if (target.valid === undefined) {
-      const inScene = target.x >= 0 && target.y >= 0 &&
-        target.x + target.w <= SCENE_MAX_SIDE && target.y + target.h <= SCENE_MAX_SIDE;
-      if (state.mode === 'resize') {
-        // Making a camera bigger: the cameras it covers move aside on release (Nx Witness style)
-        target.valid = inScene;
-        const covered = tiles
-          .filter((tile) => tile.instanceId !== state.instanceId && tile.type !== 'slot' &&
-            !isAreaFree([tile], target.x, target.y, target.w, target.h))
-          .map((tile) => tile.instanceId);
-        if (covered.join() !== (state.displaced || []).join()) {
-          state.displaced = covered;
-          setDisplacedTileIds(covered);
-        }
-      } else {
-        target.valid = inScene && isAreaFree(tiles, target.x, target.y, target.w, target.h, state.instanceId);
-      }
+      // Nx Witness: only free cells (green); cells used by another camera are red
+      target.valid = Boolean(placeTileOnFreeCells(tiles, state.instanceId, {
+        x: target.x, y: target.y, w: target.w, h: target.h,
+      }));
     }
     const previous = state.target;
     if (!previous || previous.x !== target.x || previous.y !== target.y || previous.w !== target.w ||
@@ -1591,19 +1611,13 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       if (state.mode === 'move' && state.dropTargetId) {
         const { instanceId, dropTargetId } = state;
         setWorkspaceTiles((previousTiles) => normalizeSceneOrigin(swapTilePlaces(previousTiles, instanceId, dropTargetId)));
-      } else if (target?.valid && state.mode === 'resize') {
-        setWorkspaceAutoGrid(false);
-        setWorkspaceTiles((previousTiles) => placeTileWithDisplacement(
-          previousTiles,
-          state.instanceId,
-          { x: target.x, y: target.y, w: target.w, h: target.h },
-          sceneContext
-        ));
       } else if (target?.valid) {
         setWorkspaceAutoGrid(false);
-        setWorkspaceTiles((previousTiles) => normalizeSceneOrigin(previousTiles.map((tile) => (
-          tile.instanceId === state.instanceId ? { ...tile, x: target.x, y: target.y, w: target.w, h: target.h } : tile
-        ))));
+        setWorkspaceTiles((previousTiles) => placeTileOnFreeCells(
+          previousTiles,
+          state.instanceId,
+          { x: target.x, y: target.y, w: target.w, h: target.h }
+        ) || [...previousTiles]);
       } else {
         // Nowhere valid to go: glide back (re-render so the animation runs)
         setWorkspaceTiles((previousTiles) => [...previousTiles]);
@@ -1613,7 +1627,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setResizingTileId('');
     setTileDropTargetId('');
     setSnapPreview(null);
-    setDisplacedTileIds([]);
+    setGridOverlay(null);
     workspacePointerRef.current = null;
     window.removeEventListener('pointermove', handleWorkspacePointerMove);
     window.removeEventListener('pointerup', finishWorkspacePointer);
@@ -1648,11 +1662,27 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     const styles = grid ? window.getComputedStyle(grid) : null;
     const contentWidth = grid ? grid.clientWidth - (Number.parseFloat(styles.paddingLeft) || 0) - (Number.parseFloat(styles.paddingRight) || 0) : 1;
     const contentHeight = grid ? grid.clientHeight - (Number.parseFloat(styles.paddingTop) || 0) - (Number.parseFloat(styles.paddingBottom) || 0) : 1;
+    // Grid lines across the whole view while editing, aligned with the cells
+    const zoom = sceneZoomRef.current.scale || 1;
+    const contentRect = grid ? getGridContentRect(grid, zoom) : { left: 0, top: 0 };
+    const viewportRect = sceneViewportRef.current?.getBoundingClientRect() || { left: 0, top: 0 };
+    const cellWidthPx = Math.max(1, contentWidth / Math.max(1, gridDimsRef.current.cols));
+    const cellHeightPx = Math.max(1, contentHeight / Math.max(1, gridDimsRef.current.rows));
+    setGridOverlay({
+      left: contentRect.left - viewportRect.left,
+      top: contentRect.top - viewportRect.top,
+      cellW: cellWidthPx * zoom,
+      cellH: cellHeightPx * zoom,
+    });
     workspacePointerRef.current = {
       mode,
       edges,
       dropTargetId: '',
       element,
+      // Top-left of cell (0, 0) on screen, to find the cell under the pointer anywhere
+      contentLeft: contentRect.left,
+      contentTop: contentRect.top,
+      zoom,
       // Cell size and tile size in layout pixels (before zoom)
       cellW: Math.max(1, contentWidth / Math.max(1, gridDimsRef.current.cols)),
       cellH: Math.max(1, contentHeight / Math.max(1, gridDimsRef.current.rows)),
@@ -1707,6 +1737,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       id: activeLayoutId,
       units: 'cells',
       cellAspect: layoutCellAspect,
+      cellSpacing: layoutCellSpacing,
       tiles,
       slots,
     });
@@ -1726,6 +1757,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
               ...layout,
               units: 'cells',
               cellAspect: layoutCellAspect,
+              cellSpacing: layoutCellSpacing,
               tiles,
               slots,
               cameras: tiles.map((tile) => tile.camera),
@@ -1758,7 +1790,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         saveLayoutTimeoutRef.current = null;
       }
     }, 450);
-  }, [activeLayout, activeLayoutId, hydratedLayoutId, layoutCellAspect, liveLayouts, workspaceStarted, workspaceTiles]);
+  }, [activeLayout, activeLayoutId, hydratedLayoutId, layoutCellAspect, layoutCellSpacing, liveLayouts, workspaceStarted, workspaceTiles]);
 
   useEffect(() => {
     const handleAddCamera = (event) => {
@@ -1867,6 +1899,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       name,
       units: 'cells',
       cellAspect: layoutCellAspect,
+      cellSpacing: layoutCellSpacing,
       tiles,
       slots,
       cameras: tiles.map((tile) => tile.camera),
@@ -1883,11 +1916,12 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       id: savedLayout.id,
       units: 'cells',
       cellAspect: layoutCellAspect,
+      cellSpacing: layoutCellSpacing,
       tiles,
       slots,
     });
     return savedLayout;
-  }, [layoutCellAspect, liveLayouts, saveLiveLayouts, workspaceTiles]);
+  }, [layoutCellAspect, layoutCellSpacing, liveLayouts, saveLiveLayouts, workspaceTiles]);
 
   const saveCurrentWorkspaceLayout = useCallback(async () => {
     if (!activeLayoutId || !activeLayout) {
@@ -1906,6 +1940,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
             ...layout,
             units: 'cells',
             cellAspect: layoutCellAspect,
+            cellSpacing: layoutCellSpacing,
             tiles,
             slots,
             cameras: tiles.map((tile) => tile.camera),
@@ -1918,12 +1953,13 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       id: activeLayoutId,
       units: 'cells',
       cellAspect: layoutCellAspect,
+      cellSpacing: layoutCellSpacing,
       tiles,
       slots,
     });
     showStatusMessage('Layout saved');
     setLayoutEditMode(false);
-  }, [activeLayout, activeLayoutId, layoutCellAspect, liveLayouts, saveCurrentWorkspaceAsLayout, saveLiveLayouts, workspaceTiles]);
+  }, [activeLayout, activeLayoutId, layoutCellAspect, layoutCellSpacing, liveLayouts, saveCurrentWorkspaceAsLayout, saveLiveLayouts, workspaceTiles]);
 
   const renameCurrentWorkspaceLayout = useCallback(async () => {
     if (!activeLayoutId || !activeLayout) return;
@@ -2328,22 +2364,33 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     const observer = new ResizeObserver(compute);
     observer.observe(grid);
     return () => observer.disconnect();
-  }, [cellArrangement.cols, cellArrangement.rows, effectiveCellAspect, isMobileViewport, isWorkspaceMode, singleCameraMode, streamsToShow.length]);
+  }, [cellArrangement.cols, cellArrangement.rows, effectiveCellAspect, isMobileViewport, isWorkspaceMode, layoutCellSpacing, singleCameraMode, streamsToShow.length]);
 
   // Mouse wheel zooms the scene around the pointer (Nx Witness style)
   useEffect(() => {
     const viewport = sceneViewportRef.current;
     if (!viewport || !isWorkspaceMode || isMobileViewport) return undefined;
     const handleWheel = (event) => {
-      if (event.ctrlKey && event.deltaY === 0) return;
+      if (event.deltaY === 0) return;
       event.preventDefault();
+      if (event.ctrlKey || event.metaKey) {
+        // Ctrl + wheel: more or less space between cameras (Nx Witness cell spacing)
+        if (workspaceLockedRef.current) return;
+        const now = Date.now();
+        if (now - (wheelSpacingAtRef.current || 0) < 180) return;
+        wheelSpacingAtRef.current = now;
+        captureTileRects();
+        setLayoutCellSpacing((previous) => stepCellSpacing(previous, event.deltaY < 0 ? 1 : -1));
+        return;
+      }
       const rect = viewport.getBoundingClientRect();
       const pointerX = event.clientX - rect.left;
       const pointerY = event.clientY - rect.top;
       setSceneZoom((previous) => {
         const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
-        const scale = Math.max(1, Math.min(6, previous.scale * factor));
-        if (scale <= 1.001) return { scale: 1, x: 0, y: 0 };
+        let scale = Math.max(SCENE_MIN_ZOOM, Math.min(SCENE_MAX_ZOOM, previous.scale * factor));
+        if (Math.abs(scale - 1) < 0.04) scale = 1;
+        if (scale === 1) return { scale: 1, x: 0, y: 0 };
         // Keep the point under the pointer where it is
         const ratio = scale / previous.scale;
         return clampSceneZoom({
@@ -2355,7 +2402,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     };
     viewport.addEventListener('wheel', handleWheel, { passive: false });
     return () => viewport.removeEventListener('wheel', handleWheel);
-  }, [isMobileViewport, isWorkspaceMode]);
+  }, [captureTileRects, isMobileViewport, isWorkspaceMode]);
 
   // Zoom resets when another layout is opened
   useEffect(() => {
@@ -2388,15 +2435,16 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         { transformOrigin: '0 0', transform: 'none' },
       ], { duration: 260, easing });
     });
-  }, [workspaceTiles, workspaceGridCols, workspaceGridRows, effectiveCellAspect]);
+  }, [workspaceTiles, workspaceGridCols, workspaceGridRows, effectiveCellAspect, layoutCellSpacing]);
 
-  // The unsaved workspace remembers its cell shape in this browser
+  // The unsaved workspace remembers its cell shape and spacing in this browser
   useEffect(() => {
     if (activeLayoutId) return;
     try {
       localStorage.setItem(LIVE_CELL_ASPECT_STORAGE_KEY, layoutCellAspect);
+      localStorage.setItem(LIVE_CELL_SPACING_STORAGE_KEY, layoutCellSpacing);
     } catch {}
-  }, [activeLayoutId, layoutCellAspect]);
+  }, [activeLayoutId, layoutCellAspect, layoutCellSpacing]);
   const workspaceEmptySlotCount = isWorkspaceMode
     ? (singleCameraMode ? 0 : workspaceTiles.filter((tile) => tile.type === 'slot').length)
     : 0;
@@ -2750,6 +2798,25 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                         ))}
                       </div>
                     </div>
+                    <div className="live-workspace-menu-group" role="group" aria-label="Cell spacing">
+                      <span className="live-workspace-menu-label">Cell spacing (Ctrl + wheel)</span>
+                      <div className="live-workspace-menu-options is-four">
+                        {CELL_SPACING_OPTIONS.map((option) => (
+                          <button
+                            key={option}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={layoutCellSpacing === option}
+                            data-cell-spacing={option}
+                            disabled={workspaceLocked}
+                            className={layoutCellSpacing === option ? 'is-active' : ''}
+                            onClick={() => { captureTileRects(); setLayoutCellSpacing(option); setWorkspaceMenuOpen(false); }}
+                          >
+                            {option.charAt(0).toUpperCase() + option.slice(1)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                     {isSharedLayout && (
                       <div className="live-workspace-menu-note" data-testid="layout-shared-note">
                         Shared by {activeLayout?.ownerName || 'another user'} (view only). Use Save As to make your own copy.
@@ -2879,7 +2946,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         )}
         <div
           ref={sceneViewportRef}
-          className={`live-scene-viewport ${isWorkspaceMode && sceneZoom.scale > 1.001 ? 'is-zoomed' : ''}`}
+          className={`live-scene-viewport ${isWorkspaceMode && sceneZoom.scale > 1.001 ? 'is-zoomed' : ''} ${gridOverlay ? 'is-editing-scene' : ''}`}
           onPointerDown={(event) => {
             // Drag empty space to move around a zoomed scene
             if (!isWorkspaceMode || sceneZoomRef.current.scale <= 1.001 || event.button !== 0) return;
@@ -2908,6 +2975,32 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
             setSceneZoom({ scale: 1, x: 0, y: 0 });
           }}
         >
+        {isWorkspaceMode && gridOverlay && (
+          <div
+            className="live-scene-grid-overlay"
+            aria-hidden="true"
+            data-testid="scene-grid-overlay"
+            style={{
+              backgroundSize: `${gridOverlay.cellW}px ${gridOverlay.cellH}px`,
+              backgroundPosition: `${gridOverlay.left}px ${gridOverlay.top}px`,
+            }}
+          />
+        )}
+        {isWorkspaceMode && gridOverlay && snapPreview && (
+          // Cells the camera will take: green where it can go, red where it cannot (Nx Witness)
+          <div
+            className={`live-scene-snap-preview ${snapPreview.valid ? '' : 'is-invalid'}`}
+            aria-hidden="true"
+            data-testid="scene-snap-preview"
+            data-cells={`${snapPreview.x},${snapPreview.y},${snapPreview.w},${snapPreview.h}`}
+            style={{
+              left: `${gridOverlay.left + snapPreview.x * gridOverlay.cellW}px`,
+              top: `${gridOverlay.top + snapPreview.y * gridOverlay.cellH}px`,
+              width: `${snapPreview.w * gridOverlay.cellW}px`,
+              height: `${snapPreview.h * gridOverlay.cellH}px`,
+            }}
+          />
+        )}
         <div
           id="video-grid"
           ref={workspaceGridRef}
@@ -2915,8 +3008,9 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
           style={{
             '--grid-cols': workspaceGridCols,
             '--grid-rows': workspaceGridRows,
+            ...(isWorkspaceMode ? { '--tile-gap-px': `${CELL_SPACING_PX[layoutCellSpacing] ?? 8}px` } : {}),
             ...(isWorkspaceMode ? {
-              transform: sceneZoom.scale > 1.001 ? `translate(${sceneZoom.x}px, ${sceneZoom.y}px) scale(${sceneZoom.scale})` : 'none',
+              transform: Math.abs(sceneZoom.scale - 1) > 0.001 ? `translate(${sceneZoom.x}px, ${sceneZoom.y}px) scale(${sceneZoom.scale})` : 'none',
               transformOrigin: '0 0',
             } : {}),
             ...(activeLayout?.background && !singleCameraMode ? {
@@ -3007,31 +3101,6 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
             />
           ) : (
             <>
-              {isWorkspaceMode && !singleCameraMode && !isMobileViewport && Array.from(
-                { length: workspaceGridCols * workspaceGridRows },
-                (_, cellIndex) => (
-                  <div
-                    key={`scene-cell-${cellIndex}`}
-                    className="live-scene-cell"
-                    aria-hidden="true"
-                    style={{
-                      gridColumn: `${(cellIndex % workspaceGridCols) + 1}`,
-                      gridRow: `${Math.floor(cellIndex / workspaceGridCols) + 1}`,
-                    }}
-                  />
-                )
-              )}
-              {isWorkspaceMode && snapPreview && (
-                <div
-                  className={`live-scene-snap-preview ${snapPreview.valid ? '' : 'is-invalid'}`}
-                  aria-hidden="true"
-                  data-testid="scene-snap-preview"
-                  style={{
-                    gridColumn: `${snapPreview.x + 1} / span ${snapPreview.w}`,
-                    gridRow: `${snapPreview.y + 1} / span ${snapPreview.h}`,
-                  }}
-                />
-              )}
               {(isWorkspaceMode ? workspaceTiles : streamsToShow).map((item, index) => {
                 const workspaceTile = isWorkspaceMode ? item : null;
                 const isWorkspaceSlot = isWorkspaceMode && workspaceTile?.type === 'slot';
@@ -3094,7 +3163,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                   <div
                     key={tileInstanceId || stream.name}
                     data-tile-id={tileInstanceId || undefined}
-                    className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && resizingTileId === tileInstanceId ? 'is-resizing' : ''} ${tileInstanceId && displacedTileIds.includes(tileInstanceId) ? 'is-displaced' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
+                    className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && resizingTileId === tileInstanceId ? 'is-resizing' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
                     style={{
                       position: 'relative',
                       ...(isSingleCameraActiveTile ? {
@@ -3186,7 +3255,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
             </>
           )}
         </div>
-        {isWorkspaceMode && sceneZoom.scale > 1.001 && (
+        {isWorkspaceMode && Math.abs(sceneZoom.scale - 1) > 0.001 && (
           <div className="live-scene-zoom-badge" data-testid="scene-zoom-badge">
             <span>{Math.round(sceneZoom.scale * 100)}%</span>
             <button type="button" onClick={() => setSceneZoom({ scale: 1, x: 0, y: 0 })}>Fit</button>
