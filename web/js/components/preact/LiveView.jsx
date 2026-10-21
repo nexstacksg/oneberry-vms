@@ -31,6 +31,8 @@ import {
   normalizeSceneOrigin,
   packSceneTiles,
   placeTileOnFreeCells,
+  placeTileWithDisplacement,
+  isRectFreeOfCameras,
   CELL_SPACING_OPTIONS,
   CELL_SPACING_PX,
   stepCellSpacing,
@@ -621,6 +623,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const [resizingTileId, setResizingTileId] = useState('');
   // Cells a dragged/resized tile will snap to when released
   const [snapPreview, setSnapPreview] = useState(null);
+  // Cameras a resize will move aside (dimmed until release)
+  const [displacedTileIds, setDisplacedTileIds] = useState([]);
   // Where tiles were on screen just before a change, so they can glide to their new place
   const flipFromRef = useRef(null);
   // Scene zoom and pan (mouse wheel / drag on empty space), like Nx Witness
@@ -657,6 +661,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const workspacePointerRef = useRef(null);
   const workspaceTilesRef = useRef([]);
   const cameraSpanRef = useRef(() => ({ w: 1, h: 1 }));
+  const getCameraAspectRef = useRef(() => null);
   const workspaceLockedRef = useRef(false);
   const wheelSpacingAtRef = useRef(0);
   const workspaceAutoExpandedDropRef = useRef(false);
@@ -1558,20 +1563,28 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
           h: start.h,
         };
     } else {
-      // Corner resize: the frame follows the pointer, then snaps to whole cells
-      const minWidth = state.cellW * 0.5;
-      const minHeight = state.cellH * 0.5;
+      // Corner resize keeps the camera's shape: the frame follows the pointer
+      // proportionally, then snaps to whole multiples of the camera's cell span
       const growsLeft = state.edges.includes('w');
       const growsUp = state.edges.includes('n');
-      const width = Math.max(minWidth, state.startWidth + (growsLeft ? -dx : dx));
-      const height = Math.max(minHeight, state.startHeight + (growsUp ? -dy : dy));
+      const scaleX = (state.startWidth + (growsLeft ? -dx : dx)) / state.startWidth;
+      const scaleY = (state.startHeight + (growsUp ? -dy : dy)) / state.startHeight;
+      // Follow the direction dragged most, so dragging straight down or sideways also resizes
+      const scale = Math.max(0.3, Math.abs(scaleX - 1) >= Math.abs(scaleY - 1) ? scaleX : scaleY);
+      const width = state.startWidth * scale;
+      const height = state.startHeight * scale;
       element.style.width = `${width}px`;
       element.style.height = `${height}px`;
       element.style.justifySelf = 'start';
       element.style.alignSelf = 'start';
       element.style.transform = `translate(${growsLeft ? state.startWidth - width : 0}px, ${growsUp ? state.startHeight - height : 0}px)`;
-      const w = Math.max(1, Math.round((width + state.tileGap) / state.cellW));
-      const h = Math.max(1, Math.round((height + state.tileGap) / state.cellH));
+      const base = state.baseSpan;
+      const steps = Math.max(1, Math.min(
+        Math.floor(SCENE_MAX_SIDE / Math.max(base.w, base.h)),
+        Math.round(Math.max((width + state.tileGap) / state.cellW / base.w, (height + state.tileGap) / state.cellH / base.h))
+      ));
+      const w = base.w * steps;
+      const h = base.h * steps;
       target = {
         x: growsLeft ? start.x + start.w - w : start.x,
         y: growsUp ? start.y + start.h - h : start.y,
@@ -1581,14 +1594,27 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     }
 
     if (target.valid === undefined) {
-      // Nx Witness: only free cells (green); cells used by another camera are red
-      target.valid = Boolean(placeTileOnFreeCells(tiles, state.instanceId, {
-        x: target.x, y: target.y, w: target.w, h: target.h,
-      }));
+      const rect = { x: target.x, y: target.y, w: target.w, h: target.h };
+      if (state.mode === 'resize') {
+        // Free cells: green. Cells of another camera: orange, that camera moves aside on release.
+        target.valid = true;
+        target.displaces = !isRectFreeOfCameras(tiles, rect, state.instanceId);
+        const covered = target.displaces
+          ? tiles.filter((tile) => tile.instanceId !== state.instanceId && tile.type !== 'slot' &&
+            !isRectFreeOfCameras([tile], rect)).map((tile) => tile.instanceId)
+          : [];
+        if (covered.join() !== (state.displaced || []).join()) {
+          state.displaced = covered;
+          setDisplacedTileIds(covered);
+        }
+      } else {
+        // Moving: only free cells (green); cells used by another camera are red
+        target.valid = Boolean(placeTileOnFreeCells(tiles, state.instanceId, rect));
+      }
     }
     const previous = state.target;
     if (!previous || previous.x !== target.x || previous.y !== target.y || previous.w !== target.w ||
-        previous.h !== target.h || previous.valid !== target.valid) {
+        previous.h !== target.h || previous.valid !== target.valid || previous.displaces !== target.displaces) {
       state.target = target;
       setSnapPreview(target);
     }
@@ -1611,6 +1637,14 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       if (state.mode === 'move' && state.dropTargetId) {
         const { instanceId, dropTargetId } = state;
         setWorkspaceTiles((previousTiles) => normalizeSceneOrigin(swapTilePlaces(previousTiles, instanceId, dropTargetId)));
+      } else if (target?.valid && state.mode === 'resize') {
+        setWorkspaceAutoGrid(false);
+        setWorkspaceTiles((previousTiles) => placeTileWithDisplacement(
+          previousTiles,
+          state.instanceId,
+          { x: target.x, y: target.y, w: target.w, h: target.h },
+          sceneContext
+        ));
       } else if (target?.valid) {
         setWorkspaceAutoGrid(false);
         setWorkspaceTiles((previousTiles) => placeTileOnFreeCells(
@@ -1628,6 +1662,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setTileDropTargetId('');
     setSnapPreview(null);
     setGridOverlay(null);
+    setDisplacedTileIds([]);
+    document.body.classList.remove('is-scene-resizing-nwse', 'is-scene-resizing-nesw');
     workspacePointerRef.current = null;
     window.removeEventListener('pointermove', handleWorkspacePointerMove);
     window.removeEventListener('pointerup', finishWorkspacePointer);
@@ -1674,11 +1710,18 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       cellW: cellWidthPx * zoom,
       cellH: cellHeightPx * zoom,
     });
+    if (mode === 'resize') {
+      document.body.classList.add(edges === 'ne' || edges === 'sw' ? 'is-scene-resizing-nesw' : 'is-scene-resizing-nwse');
+    }
+    // Smallest span with the camera's shape (e.g. 1x1 for 16:9 in 16:9 cells, 1x3 for portrait)
+    const tileAspect = tile.cameraId ? getCameraAspectRef.current(tile.cameraId) : null;
+    const baseSpan = tileAspect ? spanForAspect(tileAspect, sceneContext.cellAspect) : { w: 1, h: 1 };
     workspacePointerRef.current = {
       mode,
       edges,
       dropTargetId: '',
       element,
+      baseSpan,
       // Top-left of cell (0, 0) on screen, to find the cell under the pointer anywhere
       contentLeft: contentRect.left,
       contentTop: contentRect.top,
@@ -2310,6 +2353,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       videoAspectByCamera[cameraName] ||
       (stream?.width > 0 && stream?.height > 0 ? stream.width / stream.height : null);
   };
+  getCameraAspectRef.current = getCameraAspect;
   // Cells a new camera takes; the first camera on an "auto" layout sets the cell shape
   cameraSpanRef.current = (cameraName, existingTiles) => {
     const cameraTiles = (existingTiles || [])
@@ -2989,7 +3033,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         {isWorkspaceMode && gridOverlay && snapPreview && (
           // Cells the camera will take: green where it can go, red where it cannot (Nx Witness)
           <div
-            className={`live-scene-snap-preview ${snapPreview.valid ? '' : 'is-invalid'}`}
+            className={`live-scene-snap-preview ${snapPreview.valid ? '' : 'is-invalid'} ${snapPreview.valid && snapPreview.displaces ? 'is-displacing' : ''}`}
             aria-hidden="true"
             data-testid="scene-snap-preview"
             data-cells={`${snapPreview.x},${snapPreview.y},${snapPreview.w},${snapPreview.h}`}
@@ -3163,7 +3207,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                   <div
                     key={tileInstanceId || stream.name}
                     data-tile-id={tileInstanceId || undefined}
-                    className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && resizingTileId === tileInstanceId ? 'is-resizing' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
+                    className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && resizingTileId === tileInstanceId ? 'is-resizing' : ''} ${tileInstanceId && displacedTileIds.includes(tileInstanceId) ? 'is-displaced' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
                     style={{
                       position: 'relative',
                       ...(isSingleCameraActiveTile ? {

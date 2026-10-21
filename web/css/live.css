@@ -1908,3 +1908,29 @@
 .live-workspace-menu-options.is-four {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
+
+/* Resizing takes another camera's cells: it moves aside on release */
+.live-scene-viewport > .live-scene-snap-preview.is-displacing {
+    border-color: hsl(32 95% 50%);
+    background: hsl(32 95% 50% / 0.3);
+}
+
+/* Resize cursor everywhere while a corner is dragged */
+body.is-scene-resizing-nwse,
+body.is-scene-resizing-nwse * {
+    cursor: nwse-resize !important;
+}
+
+body.is-scene-resizing-nesw,
+body.is-scene-resizing-nesw * {
+    cursor: nesw-resize !important;
+}
+
+/* Corner handles: always grabbable (the resize cursor shows on hover) */
+.live-tile-frame .live-workspace-resize-handle.is-ne,
+.live-tile-frame .live-workspace-resize-handle.is-se,
+.live-tile-frame .live-workspace-resize-handle.is-sw,
+.live-tile-frame .live-workspace-resize-handle.is-nw {
+    width: 1.75rem;
+    height: 1.75rem;
+}
