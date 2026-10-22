@@ -27,9 +27,10 @@ import {
   SCENE_MAX_SIDE,
   convertLegacyAreasToCells,
   findSceneSpot,
+  findSequentialSpot,
   isAreaFree,
   normalizeSceneOrigin,
-  packSceneTiles,
+  packSequentialTiles,
   placeTileOnFreeCells,
   CELL_SPACING_OPTIONS,
   CELL_SPACING_PX,
@@ -388,7 +389,8 @@ function normalizeWorkspaceBounds(tile, cols, rows) {
 
 function buildResponsiveWorkspaceLayout(workspaceTiles) {
   if (workspaceTiles.length === 0) return [];
-  return packSceneTiles(workspaceTiles.map((tile) => ({
+  // Cameras keep the order they were added, row by row
+  return packSequentialTiles(workspaceTiles.map((tile) => ({
     ...tile,
     w: Math.max(1, Math.min(SCENE_MAX_SIDE, tile.w || 1)),
     h: Math.max(1, Math.min(SCENE_MAX_SIDE, tile.h || 1)),
@@ -1402,7 +1404,10 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
 
       const spot = placement && isAreaFree(previousTiles, placement.x, placement.y, span.w, span.h)
         ? placement
-        : findSceneSpot(previousTiles, span.w, span.h, { preferred: placement, ...sceneContext });
+        : placement
+          ? findSceneSpot(previousTiles, span.w, span.h, { preferred: placement, ...sceneContext })
+          // Next free cell in reading order; cameras already placed never move
+          : findSequentialSpot(previousTiles, span.w, span.h);
       return normalizeSceneOrigin([...previousTiles, { ...candidateTile, x: spot.x, y: spot.y }]);
     });
     if (placement) {
@@ -2597,12 +2602,20 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     if (!from || !grid || typeof Element === 'undefined' || !Element.prototype.animate) return;
     const zoom = sceneZoomRef.current.scale || 1;
     const easing = 'cubic-bezier(0.2, 0.8, 0.2, 1)';
+    // New cameras fade in one after another, in the order they were added
+    let entering = 0;
     grid.querySelectorAll('[data-tile-id]').forEach((element) => {
       const first = from[element.dataset.tileId];
       const last = element.getBoundingClientRect();
       if (!last.width || !last.height) return;
       if (!first) {
-        element.animate([{ opacity: 0, transform: 'scale(0.94)' }, { opacity: 1, transform: 'none' }], { duration: 220, easing });
+        element.animate([{ opacity: 0, transform: 'scale(0.92)' }, { opacity: 1, transform: 'none' }], {
+          duration: 280,
+          delay: Math.min(entering, 12) * 70,
+          easing,
+          fill: 'backwards',
+        });
+        entering += 1;
         return;
       }
       const dx = (first.left - last.left) / zoom;

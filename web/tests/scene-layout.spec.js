@@ -1,13 +1,16 @@
 import {
   convertLegacyAreasToCells,
   findSceneSpot,
+  findSequentialSpot,
   isAreaFree,
   normalizeSceneOrigin,
   packSceneTiles,
+  packSequentialTiles,
   placeTileOnFreeCells,
   placeTileWithDisplacement,
   stepCellSpacing,
   sceneBounds,
+  sequenceColumns,
   spanForAspect,
 } from '../js/utils/scene-layout.js';
 
@@ -143,5 +146,36 @@ describe('stepCellSpacing (Ctrl + mouse wheel)', () => {
     expect(stepCellSpacing('large', 1)).toBe('large');
     expect(stepCellSpacing('small', -1)).toBe('none');
     expect(stepCellSpacing('none', -1)).toBe('none');
+  });
+});
+
+describe('cameras added in sequence (reading order)', () => {
+  const add = (tiles, id, w = 1, h = 1) => {
+    const spot = findSequentialSpot(tiles, w, h);
+    return [...tiles, tile(id, spot.x, spot.y, w, h)];
+  };
+  it('grid widens 1, 2, 2x2, 3x2, 3x3', () => {
+    expect([1, 2, 3, 4, 5, 6, 9, 10].map(sequenceColumns)).toEqual([1, 2, 2, 2, 3, 3, 3, 4]);
+  });
+  it('arranged layout: 1 | 2, then 3 | 4 below, then a new column', () => {
+    let tiles = [];
+    ['a', 'b', 'c', 'd', 'e', 'f', 'g'].forEach((id) => { tiles = add(tiles, id); });
+    expect(tiles.map((t) => [t.instanceId, t.x, t.y])).toEqual([
+      ['a', 0, 0], ['b', 1, 0], ['c', 0, 1], ['d', 1, 1], ['e', 2, 0], ['f', 2, 1], ['g', 0, 2],
+    ]);
+  });
+  it('arranged layout: existing cameras never move', () => {
+    const before = [tile('a', 0, 0), tile('p', 1, 0, 1, 3)];
+    const after = add(before, 'b');
+    expect(after.slice(0, 2)).toEqual(before);
+    expect(after[2]).toMatchObject({ x: 0, y: 1 });
+  });
+  it('automatic layout keeps the order, row by row', () => {
+    const packed = packSequentialTiles(['a', 'b', 'c', 'd', 'e'].map((id) => tile(id, 9, 9)));
+    expect(packed.map((t) => [t.x, t.y])).toEqual([[0, 0], [1, 0], [2, 0], [0, 1], [1, 1]]);
+  });
+  it('automatic layout with a tall camera fills the cells beside it in order', () => {
+    const packed = packSequentialTiles([tile('a', 0, 0), tile('b', 0, 0), tile('p', 0, 0, 1, 3), tile('c', 0, 0)]);
+    expect(packed.map((t) => [t.instanceId, t.x, t.y])).toEqual([['a', 0, 0], ['b', 1, 0], ['p', 2, 0], ['c', 0, 1]]);
   });
 });

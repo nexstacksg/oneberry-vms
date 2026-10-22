@@ -148,6 +148,69 @@ export function packSceneTiles(tiles, { cellAspect = 16 / 9, viewportAspect = 16
 }
 
 /**
+ * Columns for a grid that fills in reading order as cameras are added:
+ * 1, 2, 2x2, 3x2, 3x3, 4x3, 4x4 ... (by cells used, so big tiles count more).
+ */
+export function sequenceColumns(cellCount) {
+  return Math.max(1, Math.min(SCENE_MAX_SIDE, Math.ceil(Math.sqrt(Math.max(1, cellCount)))));
+}
+
+/** First free w x h spot in reading order (row by row, left to right) within `cols` columns. */
+function firstFreeInReadingOrder(tiles, w, h, cols) {
+  for (let y = 0; ; y++) {
+    for (let x = 0; x + w <= Math.max(cols, w); x++) {
+      if (isAreaFree(tiles, x, y, w, h)) return { x, y };
+    }
+  }
+}
+
+/**
+ * Automatic layout: tiles keep the order they were added and fill the grid
+ * row by row; the grid widens step by step as more cameras come in.
+ */
+export function packSequentialTiles(tiles) {
+  const list = tiles || [];
+  if (list.length === 0) return list;
+  const widest = Math.max(...list.map((tile) => tile.w || 1));
+  const totalCells = list.reduce((sum, tile) => sum + (tile.w || 1) * (tile.h || 1), 0);
+  const cols = Math.max(widest, sequenceColumns(totalCells));
+  const placed = [];
+  list.forEach((tile) => {
+    const w = tile.w || 1;
+    const h = tile.h || 1;
+    const spot = firstFreeInReadingOrder(placed, w, h, cols);
+    placed.push({ ...tile, x: spot.x, y: spot.y, w, h });
+  });
+  return placed;
+}
+
+/**
+ * Where a new camera goes in an arranged layout, without moving any camera:
+ * the first free cell in reading order; when the scene is full, a new column
+ * while the scene is narrower than the sequence grid, otherwise a new row.
+ * @returns {{x:number, y:number}}
+ */
+export function findSequentialSpot(tiles, w, h) {
+  const list = tiles || [];
+  if (list.length === 0) return { x: 0, y: 0 };
+  const { cols, rows } = sceneBounds(list);
+  for (let y = 0; y + h <= rows; y++) {
+    for (let x = 0; x + w <= cols; x++) {
+      if (isAreaFree(list, x, y, w, h)) return { x, y };
+    }
+  }
+  const usedCells = list.reduce((sum, tile) => sum + (tile.w || 1) * (tile.h || 1), 0);
+  if (cols < sequenceColumns(usedCells + w * h) && cols + w <= SCENE_MAX_SIDE) {
+    // New column on the right, from the top
+    for (let y = 0; ; y++) {
+      if (isAreaFree(list, cols, y, w, h)) return { x: cols, y };
+    }
+  }
+  // New row at the bottom, from the left
+  return firstFreeInReadingOrder(list, w, h, Math.max(cols, w));
+}
+
+/**
  * Layouts saved before the scene used whole cells (48-unit grid): scale them
  * so their smallest tile becomes one cell.
  * @param {Object[]} areas tiles and slots with x, y, w, h
