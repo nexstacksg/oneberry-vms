@@ -1733,11 +1733,7 @@
     overflow: hidden;
 }
 
-.live-scene-viewport.is-zoomed {
-    cursor: grab;
-}
-
-.live-scene-viewport.is-zoomed:active {
+.live-scene-viewport.is-panning {
     cursor: grabbing;
 }
 
@@ -2043,4 +2039,14 @@ body.is-scene-resizing-nesw * {
 
 .live-tile-context-menu .is-danger {
     color: hsl(0 72% 50%);
+}
+
+/* Drag on empty space: selection box (rubber band) */
+.live-scene-selection-box {
+    position: absolute;
+    z-index: 45;
+    border: 1px solid hsl(var(--primary));
+    background: hsl(var(--primary) / 0.12);
+    border-radius: 2px;
+    pointer-events: none;
 }

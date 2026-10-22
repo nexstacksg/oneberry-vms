@@ -622,6 +622,9 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const [selectedTileIds, setSelectedTileIds] = useState([]);
   const [tileContextMenu, setTileContextMenu] = useState(null);
   const lastPointerDraggedRef = useRef(false);
+  const [selectionBox, setSelectionBox] = useState(null);
+  const selectedTileIdsRef = useRef([]);
+  selectedTileIdsRef.current = selectedTileIds;
   const [resizingTileId, setResizingTileId] = useState('');
   // Cells a dragged/resized tile will snap to when released
   const [snapPreview, setSnapPreview] = useState(null);
@@ -1553,6 +1556,50 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     });
   }, [selectedTileIds]);
 
+  // Rubber-band selection: drag a box over empty space, cameras it touches are selected
+  const startSelectionBox = useCallback((event) => {
+    const viewport = sceneViewportRef.current;
+    if (!viewport) return;
+    event.preventDefault();
+    const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+    const startIds = additive ? selectedTileIdsRef.current : [];
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let active = false;
+    if (!additive) setSelectedTileIds((previousIds) => (previousIds.length ? [] : previousIds));
+
+    const move = (moveEvent) => {
+      if (!active && Math.abs(moveEvent.clientX - startX) + Math.abs(moveEvent.clientY - startY) < 5) return;
+      active = true;
+      lastPointerDraggedRef.current = true;
+      const view = viewport.getBoundingClientRect();
+      const left = Math.max(view.left, Math.min(startX, moveEvent.clientX));
+      const top = Math.max(view.top, Math.min(startY, moveEvent.clientY));
+      const right = Math.min(view.right, Math.max(startX, moveEvent.clientX));
+      const bottom = Math.min(view.bottom, Math.max(startY, moveEvent.clientY));
+      setSelectionBox({ left: left - view.left, top: top - view.top, width: right - left, height: bottom - top });
+      const touched = [];
+      viewport.querySelectorAll('.live-workspace-tile[data-tile-id]').forEach((tileElement) => {
+        // The picture frame, not the cell around it
+        const frame = (tileElement.querySelector('.live-tile-frame') || tileElement).getBoundingClientRect();
+        if (frame.left < right && frame.right > left && frame.top < bottom && frame.bottom > top) {
+          touched.push(tileElement.dataset.tileId);
+        }
+      });
+      const nextIds = [...startIds, ...touched.filter((id) => !startIds.includes(id))];
+      setSelectedTileIds((previousIds) => (previousIds.join() === nextIds.join() ? previousIds : nextIds));
+    };
+    const up = () => {
+      setSelectionBox(null);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }, []);
+
   // Forget selected cameras that are no longer in the layout
   useEffect(() => {
     setSelectedTileIds((previousIds) => {
@@ -1758,6 +1805,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     lastPointerDraggedRef.current = false;
     // Only the main button moves or resizes; right-click opens the camera menu
     if (event.button !== undefined && event.button !== 0) return;
+    // Shift + drag over a camera draws a selection box instead of moving it
+    if (mode === 'move' && event.shiftKey) return;
     if (!workspaceStarted || !tile) return;
     if (workspaceLocked) return;
     if (isMobileViewport) return;
@@ -3118,18 +3167,26 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
           ref={sceneViewportRef}
           className={`live-scene-viewport ${isWorkspaceMode && sceneZoom.scale > 1.001 ? 'is-zoomed' : ''} ${gridOverlay ? 'is-editing-scene' : ''}`}
           onPointerDown={(event) => {
-            // Click on empty space clears the selected cameras
-            if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.target.closest('.live-workspace-tile')) {
-              setSelectedTileIds((previousIds) => (previousIds.length ? [] : previousIds));
+            if (!isWorkspaceMode) return;
+            const onEmptySpace = !event.target.closest('.live-workspace-tile, .live-workspace-slot, button, input, select, textarea, .live-tile-context-menu, .live-scene-zoom-badge');
+            const onCamera = Boolean(event.target.closest('.live-workspace-tile')) &&
+              !event.target.closest('button, input, select, textarea, .stream-controls, .live-workspace-resize-handle');
+            if (event.button === 0 && (onEmptySpace || (event.shiftKey && onCamera))) {
+              // Drag a box to select cameras (Shift also starts it over a camera).
+              // Ctrl/Shift keep the cameras already selected.
+              startSelectionBox(event);
+              return;
             }
-            // Drag empty space to move around a zoomed scene
-            if (!isWorkspaceMode || sceneZoomRef.current.scale <= 1.001 || event.button !== 0) return;
-            if (event.target.closest('.live-workspace-tile, .live-workspace-slot, button, input, select, textarea')) return;
+            // Right or middle drag on empty space moves around a zoomed scene
+            if (!onEmptySpace || sceneZoomRef.current.scale <= 1.001 || (event.button !== 1 && event.button !== 2)) return;
+            event.preventDefault();
             const startX = event.clientX;
             const startY = event.clientY;
             const startZoom = sceneZoomRef.current;
+            let panned = false;
             sceneViewportRef.current?.classList.add('is-panning');
             const move = (moveEvent) => {
+              if (Math.abs(moveEvent.clientX - startX) + Math.abs(moveEvent.clientY - startY) > 4) panned = true;
               setSceneZoom(clampSceneZoom({
                 ...startZoom,
                 x: startZoom.x + (moveEvent.clientX - startX),
@@ -3140,6 +3197,12 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
               sceneViewportRef.current?.classList.remove('is-panning');
               window.removeEventListener('pointermove', move);
               window.removeEventListener('pointerup', up);
+              // No browser menu after a right-drag pan
+              if (panned) {
+                const block = (menuEvent) => menuEvent.preventDefault();
+                window.addEventListener('contextmenu', block, { capture: true, once: true });
+                window.setTimeout(() => window.removeEventListener('contextmenu', block, { capture: true }), 300);
+              }
             };
             window.addEventListener('pointermove', move);
             window.addEventListener('pointerup', up);
@@ -3149,6 +3212,19 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
             setSceneZoom({ scale: 1, x: 0, y: 0 });
           }}
         >
+        {isWorkspaceMode && selectionBox && (
+          <div
+            className="live-scene-selection-box"
+            aria-hidden="true"
+            data-testid="scene-selection-box"
+            style={{
+              left: `${selectionBox.left}px`,
+              top: `${selectionBox.top}px`,
+              width: `${selectionBox.width}px`,
+              height: `${selectionBox.height}px`,
+            }}
+          />
+        )}
         {isWorkspaceMode && gridOverlay && (
           <div
             className="live-scene-grid-overlay"
