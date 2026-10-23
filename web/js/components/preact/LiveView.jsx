@@ -21,6 +21,13 @@ import { getAuthHeaders } from '../../utils/auth-utils.js';
 import { useI18n } from '../../i18n.js';
 
 import { normalizeItemQuality } from './useItemQuality.js';
+import {
+  createLayoutTab,
+  loadLayoutTabs,
+  reconcileTabsWithLayouts,
+  saveLayoutTabs,
+  tabKeyAfterClose,
+} from '../../utils/live-layout-tabs.js';
 import { pickLiveLayoutExtras } from '../../utils/live-layout-extras.js';
 import { validateSession } from '../../utils/auth-utils.js';
 import {
@@ -486,6 +493,18 @@ function serializeWorkspaceTilesForSave(workspaceTiles) {
   }));
 }
 
+/** One string for what a layout looks like; a different string means unsaved changes. */
+function layoutPayloadKey(layoutId, cellAspect, cellSpacing, workspaceTiles) {
+  return JSON.stringify({
+    id: layoutId || '',
+    units: 'cells',
+    cellAspect,
+    cellSpacing,
+    tiles: serializeWorkspaceTilesForSave(workspaceTiles),
+    slots: serializeWorkspaceSlotsForSave(workspaceTiles),
+  });
+}
+
 function serializeWorkspaceSlotsForSave(workspaceTiles) {
   return workspaceTiles.filter((tile) => tile.type === 'slot').map((tile) => ({
     id: tile.instanceId,
@@ -661,7 +680,6 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     };
   });
   const [hydratedLayoutId, setHydratedLayoutId] = useState('');
-  const lastSavedLayoutPayloadRef = useRef('');
   const saveLayoutTimeoutRef = useRef(null);
   const workspaceGridRef = useRef(null);
   const workspacePointerRef = useRef(null);
@@ -673,7 +691,16 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const workspaceAutoExpandedDropRef = useRef(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [layoutPresetMenuOpen, setLayoutPresetMenuOpen] = useState(false);
-  const [layoutEditMode, setLayoutEditMode] = useState(false);
+  // Layout tabs (Nx Witness style); changes stay a draft until saved
+  const [currentUsername, setCurrentUsername] = useState(null);
+  const [layoutTabs, setLayoutTabs] = useState([]);
+  const [activeTabKey, setActiveTabKey] = useState('');
+  const [tabsReady, setTabsReady] = useState(false);
+  const initialSearchRef = useRef(typeof window !== 'undefined' ? window.location.search : '');
+  // What the open layout looked like when it was opened or last saved
+  const [savedPayloadKey, setSavedPayloadKey] = useState('');
+  const [tabContextMenu, setTabContextMenu] = useState(null);
+  const [closeTabPrompt, setCloseTabPrompt] = useState(null);
   const [urlStreamHydrated, setUrlStreamHydrated] = useState(false);
   const [removingTileIds, setRemovingTileIds] = useState(new Set());
   const [isMobileViewport, setIsMobileViewport] = useState(false);
@@ -880,7 +907,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   );
 
   const {
-    data: liveLayoutsData = { layouts: [] }
+    data: liveLayoutsData = { layouts: [] },
+    isSuccess: liveLayoutsLoaded,
   } = useQuery(
     ['live-layouts'],
     '/api/live-layouts',
@@ -926,7 +954,10 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   useEffect(() => {
     let cancelled = false;
     validateSession().then((session) => {
-      if (!cancelled) setIsAdminUser(session?.role === 'admin');
+      if (!cancelled) {
+        setIsAdminUser(session?.role === 'admin');
+        setCurrentUsername(session?.username || '');
+      }
     }).catch(() => {});
     return () => { cancelled = true; };
   }, []);
@@ -1139,17 +1170,25 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   // Shared with me by someone else: read-only. Locked by its owner: no editing until unlocked.
   const isSharedLayout = Boolean(activeLayout?.sharedWithMe);
   const isLockedLayout = Boolean(activeLayout?.locked);
-  const workspaceLocked = singleCameraMode || (Boolean(activeLayoutId) && (!layoutEditMode || isSharedLayout || isLockedLayout));
+  // Layouts can be changed any time (changes are a draft until saved), except
+  // a locked layout, one shared by someone else, or the single camera view
+  const workspaceLocked = singleCameraMode || (Boolean(activeLayoutId) && (isSharedLayout || isLockedLayout));
   workspaceLockedRef.current = workspaceLocked;
+  const lockedReasonRef = useRef('');
+  lockedReasonRef.current = singleCameraMode
+    ? 'Go back to the layout to change it'
+    : isSharedLayout
+      ? 'This layout is shared with you (view only). Use Save As to make your own copy.'
+      : 'This layout is locked. Unlock it to make changes.';
+  const showLockedLayoutMessage = () => showStatusMessage(lockedReasonRef.current, 'error', 5000);
 
   const captureCurrentLayoutState = useCallback(() => ({
     selectedLayoutId: activeLayoutId,
     workspaceTiles,
     workspaceAutoGrid,
     currentPage,
-    layoutEditMode,
     hydratedLayoutId,
-  }), [activeLayoutId, currentPage, hydratedLayoutId, layoutEditMode, workspaceAutoGrid, workspaceTiles]);
+  }), [activeLayoutId, currentPage, hydratedLayoutId, workspaceAutoGrid, workspaceTiles]);
 
   const exitSingleCameraView = useCallback((layoutId = '') => {
     const previousLayoutState = singleCameraView?.previousLayoutState || null;
@@ -1163,7 +1202,6 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     if (previousLayoutState && (!targetLayoutId || previousLayoutState.selectedLayoutId === targetLayoutId)) {
       setWorkspaceTiles(previousLayoutState.workspaceTiles);
       setWorkspaceAutoGrid(previousLayoutState.workspaceAutoGrid);
-      setLayoutEditMode(previousLayoutState.layoutEditMode);
       setHydratedLayoutId(previousLayoutState.hydratedLayoutId);
       setCurrentPage(previousLayoutState.currentPage);
     } else {
@@ -1242,7 +1280,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setSingleCameraView(null);
     setActiveLayoutId('');
     setHydratedLayoutId('');
-    lastSavedLayoutPayloadRef.current = '';
+    setSavedPayloadKey('');
   }, [activeLayout, activeLayoutId, isLoadingStreams, liveLayouts.layouts.length]);
 
   useEffect(() => {
@@ -1284,21 +1322,263 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setWorkspaceAutoGrid(tiles.length === 0 && slots.length === 0);
     setLayoutCellAspect(activeLayout.cellAspect || 'auto');
     setLayoutCellSpacing(activeLayout.cellSpacing || 'medium');
-    setLayoutEditMode(false);
     setCurrentPage(0);
 
-    const serializedTiles = serializeWorkspaceTilesForSave(tiles);
-    const serializedSlots = serializeWorkspaceSlotsForSave(slots);
-    lastSavedLayoutPayloadRef.current = JSON.stringify({
-      id: activeLayout.id,
-      units: 'cells',
-      cellAspect: activeLayout.cellAspect || 'auto',
-      cellSpacing: activeLayout.cellSpacing || 'medium',
-      tiles: serializedTiles,
-      slots: serializedSlots,
-    });
+    setSavedPayloadKey(layoutPayloadKey(activeLayout.id, activeLayout.cellAspect || 'auto', activeLayout.cellSpacing || 'medium', [...tiles, ...slots]));
     setHydratedLayoutId(activeLayoutId);
   }, [activeLayout, activeLayoutId, hydratedLayoutId, streamByName, streams.length]);
+
+  // ---- Layout tabs ---------------------------------------------------------
+  // The open tab is what Live View shows; other tabs keep their unsaved changes
+  // (draft) until they are opened again. Nothing is saved until the user saves.
+  const activeLayoutPayloadKey = useMemo(() => (
+    layoutPayloadKey(activeLayoutId, layoutCellAspect, layoutCellSpacing, workspaceTiles)
+  ), [activeLayoutId, layoutCellAspect, layoutCellSpacing, workspaceTiles]);
+  const isActiveDraft = activeLayoutId
+    ? hydratedLayoutId === activeLayoutId && Boolean(savedPayloadKey) && activeLayoutPayloadKey !== savedPayloadKey
+    : workspaceTiles.length > 0;
+  const activeTab = layoutTabs.find((tab) => tab.key === activeTabKey) || null;
+  const activeTabTitleRef = useRef('');
+  activeTabTitleRef.current = activeTab && !activeTab.layoutId ? activeTab.title : '';
+
+  // Unsaved changes of the open tab, as kept in its tab
+  const currentTabDraft = () => (isActiveDraft ? {
+    tiles: workspaceTiles,
+    cellAspect: layoutCellAspect,
+    cellSpacing: layoutCellSpacing,
+    autoGrid: workspaceAutoGrid,
+    baseline: activeLayoutId ? savedPayloadKey : '',
+  } : null);
+
+  const tabStateRef = useRef({});
+  tabStateRef.current = {
+    layoutTabs,
+    activeTabKey,
+    activeLayoutId,
+    isDraft: isActiveDraft,
+    singleCameraView,
+    draft: currentTabDraft,
+  };
+
+  // The open tab with its latest changes, ready to be put away
+  function tabsWithCurrentDraft() {
+    const state = tabStateRef.current;
+    if (state.singleCameraView) return state.layoutTabs;
+    return state.layoutTabs.map((tab) => (
+      tab.key === state.activeTabKey
+        ? { ...tab, layoutId: state.activeLayoutId || '', draft: state.draft() }
+        : tab
+    ));
+  }
+
+  // Show a tab: its draft if it has one, otherwise the saved layout
+  function showTabContents(tab) {
+    setSingleCameraView(null);
+    setSelectedTileIds([]);
+    setTileContextMenu(null);
+    setCurrentPage(0);
+    setWorkspaceStarted(true);
+    captureTileRects();
+    if (tab.draft) {
+      setActiveLayoutId(tab.layoutId || '');
+      setWorkspaceTiles(tab.draft.tiles || []);
+      setLayoutCellAspect(tab.draft.cellAspect || 'auto');
+      setLayoutCellSpacing(tab.draft.cellSpacing || 'medium');
+      setWorkspaceAutoGrid(Boolean(tab.draft.autoGrid));
+      setSavedPayloadKey(tab.draft.baseline || '');
+      setHydratedLayoutId(tab.layoutId || '');
+    } else if (tab.layoutId) {
+      setActiveLayoutId(tab.layoutId);
+      setWorkspaceTiles([]);
+      setSavedPayloadKey('');
+      // Loads the saved layout
+      setHydratedLayoutId('');
+    } else {
+      setActiveLayoutId('');
+      setWorkspaceTiles([]);
+      setWorkspaceAutoGrid(true);
+      setSavedPayloadKey('');
+      setHydratedLayoutId('');
+    }
+  }
+
+  function switchToLayoutTab(key, tabs = null) {
+    const state = tabStateRef.current;
+    const nextTabs = tabs || tabsWithCurrentDraft();
+    const target = nextTabs.find((tab) => tab.key === key);
+    if (!target) return;
+    setLayoutTabs(nextTabs);
+    if (key === state.activeTabKey && !tabs) return;
+    setActiveTabKey(key);
+    showTabContents(target);
+  }
+
+  function openNewLayoutTab() {
+    const tabs = tabsWithCurrentDraft();
+    const tab = createLayoutTab('', tabs);
+    switchToLayoutTab(tab.key, [...tabs, tab]);
+  }
+
+  // Before a blank layout is filled with cameras: use the open tab if it is an
+  // empty new layout, otherwise a new tab
+  function prepareNewLayoutTab() {
+    const state = tabStateRef.current;
+    const current = state.layoutTabs.find((tab) => tab.key === state.activeTabKey);
+    if (!current || (!state.activeLayoutId && !state.isDraft)) return;
+    const tabs = tabsWithCurrentDraft();
+    const tab = createLayoutTab('', tabs);
+    setLayoutTabs([...tabs, tab]);
+    setActiveTabKey(tab.key);
+  }
+
+  // A saved layout opens in its own tab (Nx Witness); if it is open already,
+  // that tab is shown. An empty new-layout tab is reused.
+  function openLayoutInTab(layoutId) {
+    const state = tabStateRef.current;
+    const tabs = tabsWithCurrentDraft();
+    const existing = tabs.find((tab) => tab.layoutId === layoutId);
+    if (existing) {
+      switchToLayoutTab(existing.key, tabs);
+      return;
+    }
+    const current = tabs.find((tab) => tab.key === state.activeTabKey);
+    if (current && !current.layoutId && !current.draft) {
+      const reused = { ...current, layoutId, title: '', draft: null };
+      switchToLayoutTab(reused.key, tabs.map((tab) => (tab.key === reused.key ? reused : tab)));
+      return;
+    }
+    const tab = createLayoutTab(layoutId, tabs);
+    switchToLayoutTab(tab.key, [...tabs, tab]);
+  }
+
+  function closeLayoutTab(key, { force = false } = {}) {
+    const tabs = tabsWithCurrentDraft();
+    const closing = tabs.find((tab) => tab.key === key);
+    if (!closing) return;
+    if (!force && closing.draft) {
+      // Unsaved changes: ask first (Save / Don't Save / Cancel)
+      if (key !== tabStateRef.current.activeTabKey) switchToLayoutTab(key, tabs);
+      setCloseTabPrompt({ key });
+      return;
+    }
+    const nextActive = tabKeyAfterClose(tabs, key, tabStateRef.current.activeTabKey);
+    let remaining = tabs.filter((tab) => tab.key !== key);
+    if (remaining.length === 0) {
+      // There is always one tab
+      remaining = [createLayoutTab('', [])];
+    }
+    const nextKey = remaining.some((tab) => tab.key === nextActive) ? nextActive : remaining[0].key;
+    if (nextKey === tabStateRef.current.activeTabKey) {
+      setLayoutTabs(remaining);
+    } else {
+      switchToLayoutTab(nextKey, remaining);
+    }
+  }
+
+  function discardActiveTabChanges() {
+    const state = tabStateRef.current;
+    const tabs = state.layoutTabs.map((tab) => (
+      tab.key === state.activeTabKey ? { ...tab, layoutId: state.activeLayoutId || '', draft: null } : tab
+    ));
+    const tab = tabs.find((candidate) => candidate.key === state.activeTabKey);
+    setLayoutTabs(tabs);
+    if (tab) showTabContents(tab);
+  }
+
+  // Open tabs come back from this browser once we know who is signed in
+  useEffect(() => {
+    if (tabsReady || currentUsername === null || !liveLayoutsLoaded) return;
+    const layoutIds = liveLayouts.layouts.map((layout) => layout.id);
+    const stored = loadLayoutTabs(currentUsername);
+    let tabs = reconcileTabsWithLayouts(stored?.tabs || [], layoutIds);
+    // The address as it was when the page opened (it is tidied up while loading)
+    const urlParams = new URLSearchParams(initialSearchRef.current);
+    const urlLayout = urlParams.get('layout') || '';
+    // ?stream=<camera> shows that camera in a new layout (it is already on screen)
+    const urlCamera = !urlLayout ? (urlParams.get('stream') || '') : '';
+    const wantsNewLayout = urlLayout === 'workspace' || urlLayout === 'none' || Boolean(urlCamera);
+    const wantedLayoutId = !wantsNewLayout && layoutIds.includes(activeLayoutId) ? activeLayoutId : '';
+    let active = null;
+    if (wantedLayoutId) {
+      active = tabs.find((tab) => tab.layoutId === wantedLayoutId) || null;
+      if (!active) {
+        active = createLayoutTab(wantedLayoutId, tabs);
+        tabs = [...tabs, active];
+      }
+    } else if (wantsNewLayout) {
+      active = tabs.find((tab) => !tab.layoutId && !tab.draft) || null;
+      if (!active) {
+        active = createLayoutTab('', tabs);
+        tabs = [...tabs, active];
+      }
+    } else {
+      active = tabs.find((tab) => tab.key === stored?.activeKey) || tabs[0] || null;
+    }
+    if (!active) {
+      active = createLayoutTab('', tabs);
+      tabs = [...tabs, active];
+    }
+    setLayoutTabs(tabs);
+    setActiveTabKey(active.key);
+    // Show the tab unless Live View already shows exactly that: the saved
+    // layout, or the camera asked for in the URL
+    if (!urlCamera && (active.draft || (active.layoutId || '') !== (activeLayoutId || '') || !active.layoutId)) {
+      showTabContents(active);
+    }
+    setTabsReady(true);
+  }, [currentUsername, liveLayoutsLoaded, liveLayouts, tabsReady]);
+
+  // Keep the open tab pointing at the layout it shows (e.g. after Save As)
+  useEffect(() => {
+    if (!tabsReady || singleCameraView) return;
+    setLayoutTabs((tabs) => {
+      let changed = false;
+      const next = tabs.map((tab) => {
+        if (tab.key !== activeTabKey || (tab.layoutId || '') === (activeLayoutId || '')) return tab;
+        changed = true;
+        return { ...tab, layoutId: activeLayoutId || '', title: activeLayoutId ? '' : (tab.title || 'New Layout') };
+      });
+      return changed ? next : tabs;
+    });
+  }, [activeLayoutId, activeTabKey, singleCameraView, tabsReady]);
+
+  // Layouts deleted elsewhere (or no longer shared) lose their tabs
+  useEffect(() => {
+    if (!tabsReady || !liveLayoutsLoaded) return;
+    const layoutIds = liveLayouts.layouts.map((layout) => layout.id);
+    const tabs = tabsWithCurrentDraft();
+    const next = reconcileTabsWithLayouts(tabs, layoutIds);
+    if (next.length === tabs.length && next.every((tab, index) => tab.layoutId === tabs[index].layoutId)) return;
+    if (next.length === 0) next.push(createLayoutTab('', []));
+    const activeStill = next.find((tab) => tab.key === activeTabKey);
+    if (activeStill) {
+      setLayoutTabs(next);
+      if ((activeStill.layoutId || '') !== (activeLayoutId || '')) showTabContents(activeStill);
+    } else {
+      switchToLayoutTab(next[0].key, next);
+    }
+  }, [liveLayouts, liveLayoutsLoaded, tabsReady]);
+
+  // Tabs and drafts are kept in this browser (they survive a reload)
+  useEffect(() => {
+    if (!tabsReady || currentUsername === null) return undefined;
+    const timeoutId = window.setTimeout(() => {
+      saveLayoutTabs(currentUsername, tabsWithCurrentDraft(), activeTabKey);
+    }, 250);
+    return () => window.clearTimeout(timeoutId);
+  }, [activeLayoutPayloadKey, activeTabKey, currentUsername, isActiveDraft, layoutTabs, savedPayloadKey, tabsReady, workspaceAutoGrid]);
+
+  // Ctrl+S saves the open layout
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== 's') return;
+      event.preventDefault();
+      saveActiveTabRef.current?.();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+  const saveActiveTabRef = useRef(null);
 
   const captureTileRects = useCallback(() => {
     const grid = workspaceGridRef.current;
@@ -1358,7 +1638,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     if (!cameraId) return;
 
     if (workspaceLocked && !options.force) {
-      showStatusMessage('Click Edit Layout before changing this saved layout', 'error', 5000);
+      showLockedLayoutMessage();
       return;
     }
 
@@ -1442,10 +1722,12 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       return;
     }
 
+    // Opens in its own "New Layout" tab (or the current one if it is an empty new layout)
+    prepareNewLayoutTab();
     setActiveLayoutId('');
     setSingleCameraView(null);
     setHydratedLayoutId('');
-    setLayoutEditMode(false);
+    setSavedPayloadKey('');
     setWorkspaceStarted(true);
     setWorkspaceAutoGrid(true);
     captureTileRects();
@@ -1464,7 +1746,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
 
   const applyWorkspacePreset = useCallback((preset) => {
     if (workspaceLocked) {
-      showStatusMessage('Click Edit Layout before changing this saved layout', 'error', 5000);
+      showLockedLayoutMessage();
       return;
     }
     captureTileRects();
@@ -1493,7 +1775,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
 
   const removeWorkspaceTile = useCallback((instanceId) => {
     if (workspaceLocked) {
-      showStatusMessage('Click Edit Layout before changing this saved layout', 'error', 5000);
+      showLockedLayoutMessage();
       return;
     }
     if (!instanceId || removeTimeoutsRef.current.has(instanceId)) return;
@@ -1524,7 +1806,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const removeSelectedTiles = useCallback((instanceIds) => {
     setTileContextMenu(null);
     if (workspaceLocked) {
-      showStatusMessage('Click Edit Layout before changing this saved layout', 'error', 5000);
+      showLockedLayoutMessage();
       return;
     }
     instanceIds.forEach((instanceId) => removeWorkspaceTile(instanceId));
@@ -1632,6 +1914,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         removeSelectedTiles(selectedTileIds);
       } else if (event.key === 'Escape') {
         setTileContextMenu(null);
+        setTabContextMenu(null);
         setSelectedTileIds([]);
       }
     };
@@ -1639,12 +1922,13 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [removeSelectedTiles, selectedTileIds, workspaceStarted]);
 
-  // Close the camera menu on any click elsewhere, scroll or window resize
+  // Close the camera (or tab) menu on any click elsewhere, scroll or window resize
   useEffect(() => {
-    if (!tileContextMenu) return undefined;
+    if (!tileContextMenu && !tabContextMenu) return undefined;
     const close = (event) => {
       if (event?.target?.closest?.('.live-tile-context-menu')) return;
       setTileContextMenu(null);
+      setTabContextMenu(null);
     };
     window.addEventListener('pointerdown', close, true);
     window.addEventListener('wheel', close, true);
@@ -1656,7 +1940,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       window.removeEventListener('resize', close);
       window.removeEventListener('blur', close);
     };
-  }, [tileContextMenu]);
+  }, [tileContextMenu, tabContextMenu]);
 
   const getWorkspaceCellSize = useCallback(() => {
     const grid = workspaceGridRef.current;
@@ -1899,10 +2183,11 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     window.dispatchEvent(new CustomEvent('oneberry:live-layout-edit-mode', {
       detail: {
         layoutId: activeLayoutId,
-        editing: Boolean(activeLayoutId && layoutEditMode),
+        // The sidebar can add cameras to (or remove them from) the open layout
+        editing: Boolean(activeLayoutId && !workspaceLocked),
       },
     }));
-  }, [activeLayoutId, layoutEditMode]);
+  }, [activeLayoutId, workspaceLocked]);
 
   useEffect(() => () => {
     if (typeof window === 'undefined') return;
@@ -1911,70 +2196,6 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     }));
   }, [activeLayoutId]);
 
-  useEffect(() => {
-    if (!activeLayoutId || !activeLayout || !workspaceStarted || hydratedLayoutId !== activeLayoutId) return;
-    if (activeLayout.sharedWithMe) return;
-
-    const tiles = serializeWorkspaceTilesForSave(workspaceTiles);
-    const slots = serializeWorkspaceSlotsForSave(workspaceTiles);
-    const payloadKey = JSON.stringify({
-      id: activeLayoutId,
-      units: 'cells',
-      cellAspect: layoutCellAspect,
-      cellSpacing: layoutCellSpacing,
-      tiles,
-      slots,
-    });
-
-    if (payloadKey === lastSavedLayoutPayloadRef.current) return;
-
-    if (saveLayoutTimeoutRef.current) {
-      window.clearTimeout(saveLayoutTimeoutRef.current);
-    }
-
-    saveLayoutTimeoutRef.current = window.setTimeout(async () => {
-      const previousLayouts = liveLayouts;
-      const nextLayouts = {
-        layouts: liveLayouts.layouts.map((layout) => (
-          layout.id === activeLayoutId
-            ? {
-              ...layout,
-              units: 'cells',
-              cellAspect: layoutCellAspect,
-              cellSpacing: layoutCellSpacing,
-              tiles,
-              slots,
-              cameras: tiles.map((tile) => tile.camera),
-            }
-            : layout
-        )),
-      };
-
-      try {
-        lastSavedLayoutPayloadRef.current = payloadKey;
-        queryClient.setQueryData(['live-layouts'], nextLayouts);
-        const saved = await fetchJSON('/api/live-layouts', {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            ...getAuthHeaders(),
-          },
-          body: JSON.stringify(nextLayouts),
-          timeout: 10000,
-          retries: 1,
-          retryDelay: 1000,
-        });
-        const normalized = normalizeLiveLayouts(saved);
-        queryClient.setQueryData(['live-layouts'], normalized);
-      } catch (error) {
-        queryClient.setQueryData(['live-layouts'], previousLayouts);
-        lastSavedLayoutPayloadRef.current = '';
-        showStatusMessage(error.message || 'Failed to save layout', 'error', 8000);
-      } finally {
-        saveLayoutTimeoutRef.current = null;
-      }
-    }, 450);
-  }, [activeLayout, activeLayoutId, hydratedLayoutId, layoutCellAspect, layoutCellSpacing, liveLayouts, workspaceStarted, workspaceTiles]);
 
   useEffect(() => {
     const handleAddCamera = (event) => {
@@ -2025,13 +2246,18 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   useEffect(() => {
     const handleShowLayout = (event) => {
       const layoutId = String(event.detail?.layoutId || '').trim();
-      exitSingleCameraView(layoutId);
-      if (layoutId) {
-        setHydratedLayoutId((previousHydratedLayoutId) => (
-          previousHydratedLayoutId === layoutId ? previousHydratedLayoutId : ''
-        ));
-      }
       setLayoutPresetMenuOpen(false);
+      setWorkspaceMenuOpen(false);
+      // Back from the single camera view of the layout that is already open
+      if (tabStateRef.current.singleCameraView && layoutId === tabStateRef.current.activeLayoutId) {
+        exitSingleCameraView(layoutId);
+        return;
+      }
+      if (layoutId) {
+        openLayoutInTab(layoutId);
+      } else {
+        exitSingleCameraView(layoutId);
+      }
       setWorkspaceMenuOpen(false);
     };
 
@@ -2041,11 +2267,27 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       enterSingleCameraView(layoutId, cameraId);
     };
 
+    const handleNavigate = () => {
+      const layoutParam = new URLSearchParams(window.location.search).get('layout') || '';
+      if (layoutParam === 'workspace') {
+        const state = tabStateRef.current;
+        const emptyTab = state.layoutTabs.find((tab) => !tab.layoutId && !tab.draft && tab.key !== state.activeTabKey);
+        if (!state.activeLayoutId && !state.isDraft) return;
+        if (emptyTab) switchToLayoutTab(emptyTab.key);
+        else openNewLayoutTab();
+      } else if (layoutParam && layoutParam !== tabStateRef.current.activeLayoutId) {
+        openLayoutInTab(layoutParam);
+      }
+    };
+    window.addEventListener('oneberry:navigate', handleNavigate);
+    window.addEventListener('popstate', handleNavigate);
     window.addEventListener('oneberry:show-live-layout', handleShowLayout);
     window.addEventListener('oneberry:show-live-layout-camera', handleShowLayoutCamera);
     return () => {
       window.removeEventListener('oneberry:show-live-layout', handleShowLayout);
       window.removeEventListener('oneberry:show-live-layout-camera', handleShowLayoutCamera);
+      window.removeEventListener('oneberry:navigate', handleNavigate);
+      window.removeEventListener('popstate', handleNavigate);
     };
   }, [enterSingleCameraView, exitSingleCameraView]);
 
@@ -2093,25 +2335,23 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       layouts: [...liveLayouts.layouts, nextLayout],
     }, previousLayouts);
     const savedLayout = saved.layouts.find((layout) => layout.id === nextLayout.id) || nextLayout;
+    // The tab now shows the saved layout, with no unsaved changes
     setActiveLayoutId(savedLayout.id);
     setHydratedLayoutId(savedLayout.id);
-    setLayoutEditMode(false);
-    lastSavedLayoutPayloadRef.current = JSON.stringify({
-      id: savedLayout.id,
-      units: 'cells',
-      cellAspect: layoutCellAspect,
-      cellSpacing: layoutCellSpacing,
-      tiles,
-      slots,
-    });
+    setSavedPayloadKey(layoutPayloadKey(savedLayout.id, layoutCellAspect, layoutCellSpacing, workspaceTiles));
+    showStatusMessage(`Layout "${savedLayout.name}" saved`);
     return savedLayout;
   }, [layoutCellAspect, layoutCellSpacing, liveLayouts, saveLiveLayouts, workspaceTiles]);
 
   const saveCurrentWorkspaceLayout = useCallback(async () => {
     if (!activeLayoutId || !activeLayout) {
-      const name = window.prompt('Layout name');
-      if (name) await saveCurrentWorkspaceAsLayout(name);
-      return;
+      const name = window.prompt('Layout name', activeTabTitleRef.current || '');
+      if (!name) return false;
+      return Boolean(await saveCurrentWorkspaceAsLayout(name));
+    }
+    if (activeLayout.sharedWithMe || activeLayout.locked) {
+      showLockedLayoutMessage();
+      return false;
     }
 
     const tiles = serializeWorkspaceTilesForSave(workspaceTiles);
@@ -2133,17 +2373,18 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       )),
     };
     await saveLiveLayouts(nextLayouts, previousLayouts);
-    lastSavedLayoutPayloadRef.current = JSON.stringify({
-      id: activeLayoutId,
-      units: 'cells',
-      cellAspect: layoutCellAspect,
-      cellSpacing: layoutCellSpacing,
-      tiles,
-      slots,
-    });
+    setSavedPayloadKey(layoutPayloadKey(activeLayoutId, layoutCellAspect, layoutCellSpacing, workspaceTiles));
     showStatusMessage('Layout saved');
-    setLayoutEditMode(false);
+    return true;
   }, [activeLayout, activeLayoutId, layoutCellAspect, layoutCellSpacing, liveLayouts, saveCurrentWorkspaceAsLayout, saveLiveLayouts, workspaceTiles]);
+
+  saveActiveTabRef.current = () => {
+    if (workspaceLocked) {
+      if (activeLayoutId) showLockedLayoutMessage();
+      return;
+    }
+    saveCurrentWorkspaceLayout();
+  };
 
   const renameCurrentWorkspaceLayout = useCallback(async () => {
     if (!activeLayoutId || !activeLayout) return;
@@ -2165,14 +2406,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     await saveLiveLayouts({
       layouts: liveLayouts.layouts.filter((layout) => layout.id !== activeLayoutId),
     }, liveLayouts);
-    setActiveLayoutId('');
-    setLayoutEditMode(false);
-    setHydratedLayoutId('');
-    lastSavedLayoutPayloadRef.current = '';
-    setWorkspaceTiles([]);
-    setWorkspaceStarted(true);
-    setLayoutEditMode(true);
-    setWorkspaceAutoGrid(true);
+    // Its tab closes
+    closeLayoutTab(tabStateRef.current.activeTabKey, { force: true });
   }, [activeLayout, activeLayoutId, liveLayouts, saveLiveLayouts]);
 
   // Change settings of the open saved layout (lock, sharing, background) and save
@@ -2196,11 +2431,10 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     const locked = !activeLayout.locked;
     if (locked) {
       // Save pending edits first, then lock what is on screen
-      if (layoutEditMode) await saveCurrentWorkspaceLayout();
-      setLayoutEditMode(false);
+      if (tabStateRef.current.isDraft) await saveCurrentWorkspaceLayout();
     }
     await updateActiveLayout({ locked }, locked ? 'Layout locked. Unlock it to make changes.' : 'Layout unlocked');
-  }, [activeLayout, layoutEditMode, saveCurrentWorkspaceLayout, updateActiveLayout]);
+  }, [activeLayout, saveCurrentWorkspaceLayout, updateActiveLayout]);
 
   const openShareDialog = useCallback(async () => {
     try {
@@ -2280,7 +2514,6 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const resetCurrentWorkspaceLayout = useCallback(() => {
     setWorkspaceTiles([]);
     setWorkspaceStarted(true);
-    setLayoutEditMode(!activeLayoutId);
     setCurrentPage(0);
     setWorkspaceAutoGrid(true);
   }, [activeLayoutId]);
@@ -2897,16 +3130,84 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       <div className="live-workspace-shell">
         <div className="live-workspace-main">
           <div className="live-workspace-header">
-            <div className="live-workspace-title">
-              <span>{activeLayout?.name || 'Unsaved workspace'}</span>
-              <small>
-                {singleCameraMode && singleCameraStream ? `${singleCameraStream.name} · ` : ''}
-                {visibleWorkspaceTileCount} camera tile{visibleWorkspaceTileCount === 1 ? '' : 's'}
-                {workspaceEmptySlotCount > 0 ? ` · ${workspaceEmptySlotCount} empty` : ''}
-                {singleCameraMode ? ' · Single camera' : (activeLayoutId ? ` · ${layoutEditMode ? 'Editing' : 'Locked'}` : '')}
-              </small>
+            {/* Layout tabs (Nx Witness): one per open layout, * = unsaved changes */}
+            <div className="live-layout-tabs" role="tablist" aria-label="Open layouts" data-testid="layout-tabs">
+              {layoutTabs.map((tab) => {
+                const isActive = tab.key === activeTabKey;
+                const tabLayout = tab.layoutId ? liveLayouts.layouts.find((layout) => layout.id === tab.layoutId) : null;
+                const name = tabLayout?.name || tab.title || 'New Layout';
+                const isDraft = isActive ? isActiveDraft : Boolean(tab.draft);
+                return (
+                  <div
+                    key={tab.key}
+                    role="tab"
+                    tabIndex={isActive ? 0 : -1}
+                    aria-selected={isActive}
+                    data-tab-key={tab.key}
+                    data-layout-id={tab.layoutId || ''}
+                    className={`live-layout-tab ${isActive ? 'is-active' : ''} ${isDraft ? 'is-draft' : ''}`}
+                    title={isDraft ? `${name} (unsaved changes)` : name}
+                    onClick={() => switchToLayoutTab(tab.key)}
+                    onAuxClick={(event) => { if (event.button === 1) { event.preventDefault(); closeLayoutTab(tab.key); } }}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      if (!isActive) switchToLayoutTab(tab.key);
+                      setTabContextMenu({ x: Math.min(event.clientX, window.innerWidth - 220), y: event.clientY + 4 });
+                    }}
+                  >
+                    {tabLayout?.locked && (
+                      <svg className="live-layout-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-label="Locked">
+                        <rect x="3.5" y="7" width="9" height="6.5" rx="1.2" strokeWidth="1.4" />
+                        <path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7" strokeWidth="1.4" />
+                      </svg>
+                    )}
+                    <span className="live-layout-tab-name">{name}</span>
+                    {isDraft && <span className="live-layout-tab-draft" aria-label="Unsaved changes">*</span>}
+                    <button
+                      type="button"
+                      className="live-layout-tab-close"
+                      aria-label={`Close ${name}`}
+                      title="Close"
+                      onClick={(event) => { event.stopPropagation(); closeLayoutTab(tab.key); }}
+                    >
+                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+                        <path strokeLinecap="round" strokeWidth="1.8" d="M4.5 4.5l7 7M11.5 4.5l-7 7" />
+                      </svg>
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                type="button"
+                className="live-layout-tab-new"
+                data-testid="layout-tab-new"
+                aria-label="New layout tab"
+                title="New layout"
+                onClick={() => openNewLayoutTab()}
+              >
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+                  <path strokeLinecap="round" strokeWidth="1.8" d="M8 3.5v9M3.5 8h9" />
+                </svg>
+              </button>
             </div>
             <div className="live-workspace-header-actions">
+              {singleCameraMode ? (
+                <span className="live-layout-status">Single camera{singleCameraStream ? ` · ${singleCameraStream.name}` : ''}</span>
+              ) : isSharedLayout ? (
+                <span className="live-layout-status" title="Shared with you: view only. Use Save As to make your own copy.">View only</span>
+              ) : isLockedLayout ? (
+                <span className="live-layout-status" title="Unlock the layout (menu) to change it">Locked</span>
+              ) : isActiveDraft ? (
+                <div className="live-layout-draft-actions" data-testid="layout-draft-actions">
+                  <span className="live-layout-status is-draft">Draft · unsaved changes</span>
+                  <button type="button" className="live-layout-discard" data-testid="layout-discard" onClick={() => discardActiveTabChanges()}>
+                    Discard
+                  </button>
+                  <button type="button" className="live-layout-save" data-testid="layout-save" title="Save (Ctrl+S)" onClick={() => saveCurrentWorkspaceLayout()}>
+                    Save
+                  </button>
+                </div>
+              ) : null}
               <div className="live-workspace-layout-control">
                 <span className="live-workspace-layout-label">Layout:</span>
                 <div className="live-workspace-preset-wrap">
@@ -2918,7 +3219,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                       setLayoutPresetMenuOpen((open) => !open);
                     }}
                     disabled={workspaceLocked}
-                    title={workspaceLocked ? 'Click Edit Layout from the menu before changing this saved layout' : 'Choose an empty grid layout'}
+                    title={workspaceLocked ? lockedReasonRef.current : 'Choose an empty grid layout'}
                     aria-label="Choose empty grid layout"
                     aria-expanded={layoutPresetMenuOpen}
                   >
@@ -3016,21 +3317,6 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                       </div>
                     )}
                     {activeLayoutId && !isSharedLayout && (
-                      layoutEditMode && !isLockedLayout ? (
-                        <button type="button" role="menuitem" onClick={() => { setWorkspaceMenuOpen(false); setLayoutEditMode(false); }}>Done Editing</button>
-                      ) : (
-                        <button
-                          type="button"
-                          role="menuitem"
-                          disabled={isLockedLayout}
-                          title={isLockedLayout ? 'Unlock the layout to edit it' : undefined}
-                          onClick={() => { setWorkspaceMenuOpen(false); setLayoutEditMode(true); }}
-                        >
-                          Edit Layout
-                        </button>
-                      )
-                    )}
-                    {activeLayoutId && !isSharedLayout && (
                       <button type="button" role="menuitem" data-testid="layout-lock-toggle" onClick={() => { setWorkspaceMenuOpen(false); toggleActiveLayoutLock(); }}>
                         {isLockedLayout ? 'Unlock Layout' : 'Lock Layout'}
                       </button>
@@ -3100,6 +3386,64 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
             if (file) uploadLayoutBackground(file);
           }}
         />
+        {tabContextMenu && (
+          <div
+            className="sidebar-camera-context-menu live-tile-context-menu"
+            role="menu"
+            data-testid="layout-tab-menu"
+            style={{ left: `${tabContextMenu.x}px`, top: `${tabContextMenu.y}px` }}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <button type="button" role="menuitem" disabled={workspaceLocked} onClick={() => { setTabContextMenu(null); saveCurrentWorkspaceLayout(); }}>
+              Save Layout
+              <span style={{ marginLeft: 'auto', opacity: 0.6, fontWeight: 500 }}>Ctrl+S</span>
+            </button>
+            <button type="button" role="menuitem" onClick={() => {
+              setTabContextMenu(null);
+              const name = window.prompt('Layout name', activeLayout?.name ? `${activeLayout.name} Copy` : activeTabTitleRef.current);
+              if (name) saveCurrentWorkspaceAsLayout(name);
+            }}>Save Layout As…</button>
+            <button type="button" role="menuitem" disabled={!isActiveDraft} onClick={() => { setTabContextMenu(null); discardActiveTabChanges(); }}>Discard Changes</button>
+            <button type="button" role="menuitem" onClick={() => { setTabContextMenu(null); openNewLayoutTab(); }}>New Layout Tab</button>
+            <button type="button" role="menuitem" onClick={() => { setTabContextMenu(null); closeLayoutTab(activeTabKey); }}>Close</button>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={layoutTabs.length < 2}
+              onClick={() => {
+                setTabContextMenu(null);
+                // Tabs with unsaved changes stay open
+                const tabs = tabsWithCurrentDraft();
+                setLayoutTabs(tabs.filter((tab) => tab.key === activeTabKey || tab.draft));
+              }}
+            >
+              Close Other Tabs
+            </button>
+          </div>
+        )}
+        {closeTabPrompt && (
+          <div className="live-share-dialog-backdrop" role="presentation" onClick={() => setCloseTabPrompt(null)}>
+            <div className="live-share-dialog" role="dialog" aria-modal="true" aria-labelledby="close-tab-title" data-testid="close-tab-dialog" onClick={(event) => event.stopPropagation()}>
+              <h3 id="close-tab-title">Save changes to "{activeLayout?.name || activeTabTitleRef.current || 'New Layout'}"?</h3>
+              <p>This layout has unsaved changes. If you close it without saving, they are lost.</p>
+              <div className="live-share-actions">
+                <button type="button" className="btn-secondary" data-testid="close-tab-cancel" onClick={() => setCloseTabPrompt(null)}>Cancel</button>
+                <button type="button" className="btn-secondary" data-testid="close-tab-discard" onClick={() => {
+                  const { key } = closeTabPrompt;
+                  setCloseTabPrompt(null);
+                  closeLayoutTab(key, { force: true });
+                }}>Don't Save</button>
+                <button type="button" className="btn-primary" data-testid="close-tab-save" onClick={async () => {
+                  const { key } = closeTabPrompt;
+                  const saved = await saveCurrentWorkspaceLayout();
+                  if (!saved) return;
+                  setCloseTabPrompt(null);
+                  closeLayoutTab(key, { force: true });
+                }}>Save</button>
+              </div>
+            </div>
+          </div>
+        )}
         {shareDialogOpen && (
           <div className="live-share-dialog-backdrop" role="presentation" onClick={() => setShareDialogOpen(false)}>
             <div className="live-share-dialog" role="dialog" aria-modal="true" aria-labelledby="live-share-title" onClick={(event) => event.stopPropagation()}>
@@ -3156,7 +3500,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
               className="is-danger"
               data-testid="tile-context-remove"
               disabled={workspaceLocked}
-              title={workspaceLocked ? 'Click Edit Layout to change this saved layout' : undefined}
+              title={workspaceLocked ? lockedReasonRef.current : undefined}
               onClick={() => removeSelectedTiles(tileContextMenu.ids)}
             >
               {tileContextMenu.ids.length === 1 ? 'Remove from layout' : `Remove ${tileContextMenu.ids.length} cameras from layout`}
