@@ -4,7 +4,7 @@
  * with optional two-way audio (backchannel) support
  */
 
-import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'preact/hooks';
 import { DetectionOverlay } from './DetectionOverlay.jsx';
 import { SnapshotButton } from './SnapshotManager.jsx';
 import { LoadingIndicator } from './LoadingIndicator.jsx';
@@ -719,12 +719,70 @@ export function WebRTCVideoCell({
     itemQuality: tileItemQuality,
     effectiveQuality,
     selectedStreamSource,
+    qualityPending,
   } = useItemQuality(stream, {
     itemQuality: onItemQualityChange ? itemQuality : localItemQuality,
     isOnlyItem,
     isFullscreen: isFullscreenCell,
     sizeRef: cellRef,
   });
+
+  // Switching between main and sub stream (tile resized, High/Low chosen,
+  // fullscreen) keeps the last picture on screen until the new stream plays,
+  // so a camera that is already showing never goes back to "loading".
+  const holdFrameCanvasRef = useRef(null);
+  const [holdingFrame, setHoldingFrame] = useState(false);
+  const holdSourceRef = useRef(selectedStreamSource);
+  const isPlayingRef = useRef(false);
+  isPlayingRef.current = isPlaying;
+  useLayoutEffect(() => {
+    const previousSource = holdSourceRef.current;
+    holdSourceRef.current = selectedStreamSource;
+    if (!previousSource || previousSource === selectedStreamSource) return;
+    const video = videoRef.current;
+    const canvas = holdFrameCanvasRef.current;
+    // Runs before the old connection is closed, so the video still has its frame
+    if (!video || !canvas || !isPlayingRef.current || !(video.videoWidth > 0) || video.readyState < 2) return;
+    try {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+      setHoldingFrame(true);
+    } catch {
+      setHoldingFrame(false);
+    }
+  }, [selectedStreamSource]);
+
+  useEffect(() => {
+    if (!holdingFrame) return undefined;
+    const video = videoRef.current;
+    let done = false;
+    const release = () => {
+      if (done) return;
+      done = true;
+      setHoldingFrame(false);
+    };
+    // Swap once the new stream has drawn a frame
+    const onPlaying = () => {
+      if (!video.srcObject) return;
+      if (typeof video.requestVideoFrameCallback === 'function') {
+        video.requestVideoFrameCallback(() => release());
+      } else {
+        release();
+      }
+    };
+    video?.addEventListener('playing', onPlaying);
+    video?.addEventListener('loadeddata', onPlaying);
+    // The new stream does not come: show the normal loading/error state
+    const giveUp = window.setTimeout(release, 20000);
+    if (error) release();
+    return () => {
+      done = true;
+      video?.removeEventListener('playing', onPlaying);
+      video?.removeEventListener('loadeddata', onPlaying);
+      window.clearTimeout(giveUp);
+    };
+  }, [holdingFrame, error]);
   const handleItemQualityChange = (quality) => {
     if (onItemQualityChange) {
       onItemQualityChange(quality);
@@ -1273,6 +1331,7 @@ export function WebRTCVideoCell({
   // Initialize WebRTC connection when component mounts
   useEffect(() => {
     if (!stream || !stream.name || !videoRef.current) return;
+    if (qualityPending) return;
 
     const cameraStreamSource = selectedStreamSource || stream.name;
     const activeStreamSource = h264Fallback?.from === cameraStreamSource ? h264Fallback.source : cameraStreamSource;
@@ -2049,7 +2108,7 @@ export function WebRTCVideoCell({
     };
 
     return cleanupWebRTCResources;
-  }, [stream?.name, retryCount, selectedStreamSource, h264Fallback]);
+  }, [stream?.name, retryCount, selectedStreamSource, h264Fallback, qualityPending]);
 
   /**
    * Refresh the stream's go2rtc registration
@@ -2360,9 +2419,28 @@ export function WebRTCVideoCell({
           onResize={(event) => onVideoDimensions?.(stream.name, event.currentTarget.videoWidth, event.currentTarget.videoHeight)}
         />
 
+        {/* Last picture, held while switching between main and sub stream */}
+        <canvas
+          ref={holdFrameCanvasRef}
+          className="video-hold-frame"
+          data-testid="video-hold-frame"
+          aria-hidden="true"
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'contain',
+            backgroundColor: '#000',
+            position: 'absolute',
+            inset: isFullscreenCell ? 0 : undefined,
+            pointerEvents: 'none',
+            display: holdingFrame && !fullscreenPlayback ? 'block' : 'none',
+            ...forcedVideoStyle
+          }}
+        />
+
         <LivePreviewPoster
           streamSource={selectedStreamSource || stream.name}
-          visible={!isPlaying && !fullscreenPlayback}
+          visible={!isPlaying && !fullscreenPlayback && !holdingFrame}
           delay={0}
         />
 
@@ -2838,8 +2916,8 @@ export function WebRTCVideoCell({
         </div>
       )}
 
-      {/* Loading indicator */}
-      {isLoading && (
+      {/* Loading indicator (not while the last picture is held during a stream switch) */}
+      {isLoading && !holdingFrame && (
         <div
           data-testid="stream-starting-placeholder"
           style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 5, pointerEvents: 'none' }}

@@ -62,12 +62,21 @@ export function resolveItemQuality({ itemQuality, hasLowQuality, isOnlyItem, isF
 export function useItemQuality(stream, { itemQuality = ITEM_QUALITY.AUTO, isOnlyItem = false, isFullscreen = false, sizeRef }) {
   const hasLowQuality = hasLowQualityStream(stream);
   const [tileHeight, setTileHeight] = useState(0);
+  // Auto picks main or sub stream by tile size: wait for the first size reading
+  // so a tile does not start on one stream and switch to the other right away
+  const [measured, setMeasured] = useState(!sizeRef);
   const previousRef = useRef(null);
 
   useEffect(() => {
     const element = sizeRef?.current;
-    if (!element) return undefined;
-    const measure = () => setTileHeight(Math.round(element.getBoundingClientRect().height));
+    if (!element) {
+      setMeasured(true);
+      return undefined;
+    }
+    const measure = () => {
+      setTileHeight(Math.round(element.getBoundingClientRect().height));
+      setMeasured(true);
+    };
     measure();
     if (typeof ResizeObserver === 'undefined') return undefined;
     const observer = new ResizeObserver(measure);
@@ -85,8 +94,12 @@ export function useItemQuality(stream, { itemQuality = ITEM_QUALITY.AUTO, isOnly
   });
   previousRef.current = effectiveQuality;
 
+  const qualityPending = !measured && hasLowQuality &&
+    normalizeItemQuality(itemQuality) === ITEM_QUALITY.AUTO && !isOnlyItem && !isFullscreen;
+
   return {
     hasLowQuality,
+    qualityPending,
     itemQuality: normalizeItemQuality(itemQuality),
     effectiveQuality,
     selectedStreamSource: getStreamQualitySource(stream, effectiveQuality),
