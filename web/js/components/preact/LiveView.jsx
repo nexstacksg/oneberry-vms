@@ -23,6 +23,7 @@ import { useI18n } from '../../i18n.js';
 import { normalizeItemQuality } from './useItemQuality.js';
 import {
   createLayoutTab,
+  createTabKey,
   loadLayoutTabs,
   reconcileTabsWithLayouts,
   saveLayoutTabs,
@@ -56,6 +57,10 @@ import {
 
 // Cell shape of the unsaved workspace (saved layouts keep their own)
 const LIVE_CELL_ASPECT_STORAGE_KEY = 'lightnvr-live-cell-aspect';
+// Tabs left recently keep their cameras connected (hidden), so going back is
+// instant; this caps how many tabs and cameras stay connected in the background
+const MAX_KEPT_ALIVE_TABS = 4;
+const MAX_KEPT_ALIVE_CAMERAS = 36;
 const LIVE_CELL_SPACING_STORAGE_KEY = 'lightnvr-live-cell-spacing';
 // Mouse wheel zoom range: below 1 shows free grid around the cameras (Nx Witness)
 const SCENE_MIN_ZOOM = 0.4;
@@ -694,13 +699,17 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   // Layout tabs (Nx Witness style); changes stay a draft until saved
   const [currentUsername, setCurrentUsername] = useState(null);
   const [layoutTabs, setLayoutTabs] = useState([]);
-  const [activeTabKey, setActiveTabKey] = useState('');
+  // Known from the start, so the cameras on screen keep their identity when
+  // the saved tabs load
+  const [activeTabKey, setActiveTabKey] = useState(() => createTabKey());
   const [tabsReady, setTabsReady] = useState(false);
   const initialSearchRef = useRef(typeof window !== 'undefined' ? window.location.search : '');
   // What the open layout looked like when it was opened or last saved
   const [savedPayloadKey, setSavedPayloadKey] = useState('');
   const [tabContextMenu, setTabContextMenu] = useState(null);
   const [closeTabPrompt, setCloseTabPrompt] = useState(null);
+  // Tabs that were left, with their cameras still connected: [{ tabKey, view }]
+  const [keptAliveTabs, setKeptAliveTabs] = useState([]);
   const [urlStreamHydrated, setUrlStreamHydrated] = useState(false);
   const [removingTileIds, setRemovingTileIds] = useState(new Set());
   const [isMobileViewport, setIsMobileViewport] = useState(false);
@@ -1358,7 +1367,35 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     isDraft: isActiveDraft,
     singleCameraView,
     draft: currentTabDraft,
+    keptAliveTabs,
+    view: {
+      layoutId: activeLayoutId || '',
+      tiles: workspaceTiles,
+      cellAspect: layoutCellAspect,
+      cellSpacing: layoutCellSpacing,
+      autoGrid: workspaceAutoGrid,
+      baseline: savedPayloadKey,
+      hydratedLayoutId,
+    },
   };
+
+  // The open tab joins the tabs kept alive (most recent first, within the limits)
+  function keptAliveWithActiveTab() {
+    const state = tabStateRef.current;
+    let next = state.keptAliveTabs.filter((entry) => entry.tabKey !== state.activeTabKey);
+    const cameraCount = state.view.tiles.filter((tile) => tile.type !== 'slot' && tile.cameraId).length;
+    if (!state.singleCameraView && state.activeTabKey && cameraCount > 0) {
+      next = [{ tabKey: state.activeTabKey, cameraCount, view: state.view }, ...next];
+    }
+    const limited = [];
+    let cameras = 0;
+    next.forEach((entry) => {
+      if (limited.length >= MAX_KEPT_ALIVE_TABS || cameras + entry.cameraCount > MAX_KEPT_ALIVE_CAMERAS) return;
+      limited.push(entry);
+      cameras += entry.cameraCount;
+    });
+    return limited;
+  }
 
   // The open tab with its latest changes, ready to be put away
   function tabsWithCurrentDraft() {
@@ -1372,14 +1409,23 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   }
 
   // Show a tab: its draft if it has one, otherwise the saved layout
-  function showTabContents(tab) {
+  function showTabContents(tab, keptView = null) {
     setSingleCameraView(null);
     setSelectedTileIds([]);
     setTileContextMenu(null);
     setCurrentPage(0);
     setWorkspaceStarted(true);
     captureTileRects();
-    if (tab.draft) {
+    if (keptView) {
+      // Exactly as it was left: the same tiles, so their video keeps playing
+      setActiveLayoutId(keptView.layoutId || '');
+      setWorkspaceTiles(keptView.tiles);
+      setLayoutCellAspect(keptView.cellAspect || 'auto');
+      setLayoutCellSpacing(keptView.cellSpacing || 'medium');
+      setWorkspaceAutoGrid(Boolean(keptView.autoGrid));
+      setSavedPayloadKey(keptView.baseline || '');
+      setHydratedLayoutId(keptView.hydratedLayoutId || '');
+    } else if (tab.draft) {
       setActiveLayoutId(tab.layoutId || '');
       setWorkspaceTiles(tab.draft.tiles || []);
       setLayoutCellAspect(tab.draft.cellAspect || 'auto');
@@ -1409,8 +1455,22 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     if (!target) return;
     setLayoutTabs(nextTabs);
     if (key === state.activeTabKey && !tabs) return;
+    let keptView = null;
+    if (key !== state.activeTabKey) {
+      // A tab being closed is not kept alive
+      const leavingTabStays = nextTabs.some((tab) => tab.key === state.activeTabKey);
+      const kept = leavingTabStays
+        ? keptAliveWithActiveTab()
+        : state.keptAliveTabs.filter((entry) => entry.tabKey !== state.activeTabKey);
+      keptView = kept.find((entry) => entry.tabKey === key)?.view || null;
+      // A kept view of a saved layout is only used if it still matches the tab
+      if (keptView && (keptView.layoutId || '') !== (target.layoutId || '')) keptView = null;
+      setKeptAliveTabs(kept.filter((entry) => entry.tabKey !== key));
+    } else {
+      setKeptAliveTabs((entries) => entries.filter((entry) => entry.tabKey !== key));
+    }
     setActiveTabKey(key);
-    showTabContents(target);
+    showTabContents(target, keptView);
   }
 
   function openNewLayoutTab() {
@@ -1427,6 +1487,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     if (!current || (!state.activeLayoutId && !state.isDraft)) return;
     const tabs = tabsWithCurrentDraft();
     const tab = createLayoutTab('', tabs);
+    setKeptAliveTabs(keptAliveWithActiveTab());
     setLayoutTabs([...tabs, tab]);
     setActiveTabKey(tab.key);
   }
@@ -1461,6 +1522,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       setCloseTabPrompt({ key });
       return;
     }
+    setKeptAliveTabs((entries) => entries.filter((entry) => entry.tabKey !== key));
     const nextActive = tabKeyAfterClose(tabs, key, tabStateRef.current.activeTabKey);
     let remaining = tabs.filter((tab) => tab.key !== key);
     if (remaining.length === 0) {
@@ -1518,13 +1580,18 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       active = createLayoutTab('', tabs);
       tabs = [...tabs, active];
     }
-    setLayoutTabs(tabs);
-    setActiveTabKey(active.key);
     // Show the tab unless Live View already shows exactly that: the saved
     // layout, or the camera asked for in the URL
-    if (!urlCamera && (active.draft || (active.layoutId || '') !== (activeLayoutId || '') || !active.layoutId)) {
-      showTabContents(active);
+    const mustShow = !urlCamera && (active.draft || (active.layoutId || '') !== (activeLayoutId || '') || !active.layoutId);
+    if (!mustShow) {
+      // Keep the cameras already on screen: the tab takes the current key
+      const currentKey = activeTabKey;
+      tabs = tabs.map((tab) => (tab.key === active.key ? { ...tab, key: currentKey } : tab));
+      active = { ...active, key: currentKey };
     }
+    setLayoutTabs(tabs);
+    setActiveTabKey(active.key);
+    if (mustShow) showTabContents(active);
     setTabsReady(true);
   }, [currentUsername, liveLayoutsLoaded, liveLayouts, tabsReady]);
 
@@ -1550,6 +1617,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     const next = reconcileTabsWithLayouts(tabs, layoutIds);
     if (next.length === tabs.length && next.every((tab, index) => tab.layoutId === tabs[index].layoutId)) return;
     if (next.length === 0) next.push(createLayoutTab('', []));
+    setKeptAliveTabs((entries) => entries.filter((entry) => next.some((tab) => tab.key === entry.tabKey && tab.layoutId === entry.view.layoutId)));
     const activeStill = next.find((tab) => tab.key === activeTabKey);
     if (activeStill) {
       setLayoutTabs(next);
@@ -1909,9 +1977,9 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
         if (cameraIds.length === 0) return;
         event.preventDefault();
         setSelectedTileIds(cameraIds);
-      } else if ((event.key === 'Delete' || event.key === 'Backspace') && selectedTileIds.length > 0) {
+      } else if ((event.key === 'Delete' || event.key === 'Backspace') && selectedTileIdsRef.current.length > 0) {
         event.preventDefault();
-        removeSelectedTiles(selectedTileIds);
+        removeSelectedTiles(selectedTileIdsRef.current);
       } else if (event.key === 'Escape') {
         setTileContextMenu(null);
         setTabContextMenu(null);
@@ -2690,6 +2758,13 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     console.log(`[${logLabel}View] cols=${cols}, rows=${rows}, currentPage=${currentPage}, totalStreams=${orderedStreams.length}`);
     return result;
   }, [workspaceStarted, workspaceStreamsToShow, workspaceTiles.length, orderedStreams, isSingleStream, selectedStream, currentPage, maxStreams, cols, rows, logLabel]);
+
+  // Hidden cameras of the tabs kept alive (rendered with the visible ones)
+  const keptAliveTileEntries = useMemo(() => keptAliveTabs.flatMap((entry) => (
+    entry.view.tiles
+      .filter((tile) => tile.type !== 'slot' && tile.cameraId)
+      .map((tile) => ({ ...tile, keptAliveTabKey: entry.tabKey, keptAliveOnlyItem: entry.cameraCount === 1 }))
+  )), [keptAliveTabs]);
 
   // Arrow-key navigation between streams while one is in native fullscreen.
   useFullscreenGridNav(streamsToShow, cols, rows);
@@ -3706,9 +3781,13 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
               message={t('live.noVisibleCameraViewsMessage')}
               secondaryText={t('live.noVisibleCameraViewsSecondary')}
             />
-          ) : (
-            <>
-              {(isWorkspaceMode ? workspaceTiles : streamsToShow).map((item, index) => {
+          ) : null}
+          {/* One list for the cameras on screen and the hidden cameras of tabs
+              kept alive, so a camera keeps playing when its tab comes back */}
+          {!isLoadingStreams && !isLoading && !streamsError && streams.length > 0 && (
+            [...(isWorkspaceMode ? workspaceTiles : streamsToShow), ...(isWorkspaceMode ? keptAliveTileEntries : [])].map((item, index) => {
+                const keptAliveTabKey = isWorkspaceMode ? (item?.keptAliveTabKey || '') : '';
+                const isKeptAlive = Boolean(keptAliveTabKey);
                 const workspaceTile = isWorkspaceMode ? item : null;
                 const isWorkspaceSlot = isWorkspaceMode && workspaceTile?.type === 'slot';
                 const stream = isWorkspaceMode ? streamByName.get(workspaceTile?.cameraId) : item;
@@ -3768,10 +3847,11 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
 
                 return (
                   <div
-                    key={tileInstanceId || stream.name}
-                    data-tile-id={tileInstanceId || undefined}
+                    key={isWorkspaceMode ? `${keptAliveTabKey || activeTabKey}|${tileInstanceId}` : stream.name}
+                    data-tile-id={!isKeptAlive && tileInstanceId ? tileInstanceId : undefined}
+                    data-kept-alive-tab={isKeptAlive ? keptAliveTabKey : undefined}
                     title={stream.name}
-                    className={`live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && selectedTileIds.includes(tileInstanceId) ? 'is-selected' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && resizingTileId === tileInstanceId ? 'is-resizing' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
+                    className={isKeptAlive ? 'live-workspace-tile-kept-alive' : `live-workspace-tile ${removingTileIds.has(tileInstanceId) ? 'is-removing' : ''} ${isSingleCameraActiveTile ? 'is-single-camera-active' : ''} ${isSingleCameraInactiveTile ? 'is-single-camera-inactive' : ''} ${tileInstanceId && selectedTileIds.includes(tileInstanceId) ? 'is-selected' : ''} ${tileInstanceId && movingTileId === tileInstanceId ? 'is-moving' : ''} ${tileInstanceId && resizingTileId === tileInstanceId ? 'is-resizing' : ''} ${tileInstanceId && tileDropTargetId === tileInstanceId ? 'is-drop-target' : ''}`}
                     style={{
                       position: 'relative',
                       ...(isSingleCameraActiveTile ? {
@@ -3787,9 +3867,9 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                     onDragOver={!isWorkspaceMode && reorderMode ? (e) => handleDragOver(e, globalIndex) : undefined}
                     onDrop={!isWorkspaceMode && reorderMode ? handleDrop : undefined}
                     onDragEnd={!isWorkspaceMode && reorderMode ? handleDragEnd : undefined}
-                    onPointerDown={!singleCameraMode && isWorkspaceMode && workspaceTile ? (event) => startWorkspacePointer(event, workspaceTile, 'move') : undefined}
-                    onClick={!singleCameraMode && isWorkspaceMode && tileInstanceId ? (event) => selectTileFromClick(event, tileInstanceId) : undefined}
-                    onContextMenu={!singleCameraMode && isWorkspaceMode && tileInstanceId ? (event) => openTileContextMenu(event, tileInstanceId) : undefined}
+                    onPointerDown={!isKeptAlive && !singleCameraMode && isWorkspaceMode && workspaceTile ? (event) => startWorkspacePointer(event, workspaceTile, 'move') : undefined}
+                    onClick={!isKeptAlive && !singleCameraMode && isWorkspaceMode && tileInstanceId ? (event) => selectTileFromClick(event, tileInstanceId) : undefined}
+                    onContextMenu={!isKeptAlive && !singleCameraMode && isWorkspaceMode && tileInstanceId ? (event) => openTileContextMenu(event, tileInstanceId) : undefined}
                   >
                     {!isWorkspaceMode && reorderMode && (
                       <div
@@ -3819,7 +3899,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                         } : undefined;
                       })()}
                     >
-                    {isWorkspaceMode && tileInstanceId && !workspaceLocked && !singleCameraMode && (
+                    {isWorkspaceMode && tileInstanceId && !isKeptAlive && !workspaceLocked && !singleCameraMode && (
                       <button
                         type="button"
                         className="live-workspace-tile-close"
@@ -3832,7 +3912,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                         </svg>
                       </button>
                     )}
-                    {isWorkspaceMode && workspaceTile && !workspaceLocked && !isMobileViewport && !singleCameraMode && (
+                    {isWorkspaceMode && workspaceTile && !isKeptAlive && !workspaceLocked && !isMobileViewport && !singleCameraMode && (
                       // Resize from the corners of the picture, like Nx Witness
                       ['ne', 'se', 'sw', 'nw'].map((handle) => (
                         <span
@@ -3856,13 +3936,12 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
                       onVideoDimensions={handleVideoDimensions}
                       itemQuality={workspaceTile ? workspaceTile.quality : (classicItemQuality[stream.name] || 'auto')}
                       onItemQualityChange={(quality) => setTileItemQuality(tileInstanceId, stream.name, quality)}
-                      isOnlyItem={singleCameraMode || streamsToShow.length === 1}
+                      isOnlyItem={isKeptAlive ? item.keptAliveOnlyItem : (singleCameraMode || streamsToShow.length === 1)}
                     />
                     </div>
                   </div>
                 );
-              })}
-            </>
+              })
           )}
         </div>
         {isWorkspaceMode && Math.abs(sceneZoom.scale - 1) > 0.001 && (

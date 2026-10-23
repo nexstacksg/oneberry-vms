@@ -2236,3 +2236,8 @@ body.is-scene-resizing-nesw * {
         display: none;
     }
 }
+
+/* Cameras of tabs kept alive: connected but not shown */
+.live-workspace-tile-kept-alive {
+    display: none !important;
+}
