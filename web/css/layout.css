@@ -1611,3 +1611,91 @@ th {
 .pagination-info {
     @apply text-muted-foreground text-sm;
 }
+
+/* Camera list search (name, IP address, RTSP link) */
+.sidebar-camera-search {
+    position: relative;
+    display: flex;
+    align-items: center;
+    margin: 0.15rem 0.5rem 0.45rem;
+}
+
+.sidebar-camera-search-icon {
+    position: absolute;
+    left: 0.55rem;
+    width: 0.85rem;
+    height: 0.85rem;
+    color: hsl(var(--muted-foreground));
+    pointer-events: none;
+}
+
+.sidebar-camera-search input {
+    width: 100%;
+    min-width: 0;
+    height: 1.95rem;
+    padding: 0.25rem 1.8rem 0.25rem 1.85rem;
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.45rem;
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-size: 0.78rem;
+    outline: none;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.sidebar-camera-search input::placeholder {
+    color: hsl(var(--muted-foreground));
+}
+
+.sidebar-camera-search input:focus {
+    border-color: hsl(var(--primary) / 0.7);
+    box-shadow: 0 0 0 3px hsl(var(--primary) / 0.15);
+}
+
+/* The browser's own clear button: we draw ours */
+.sidebar-camera-search input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+}
+
+.sidebar-camera-search-clear {
+    position: absolute;
+    right: 0.3rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.35rem;
+    height: 1.35rem;
+    padding: 0;
+    border: 0;
+    border-radius: 0.3rem;
+    background: transparent;
+    color: hsl(var(--muted-foreground));
+    cursor: pointer;
+}
+
+.sidebar-camera-search-clear:hover {
+    background: hsl(var(--foreground) / 0.08);
+    color: hsl(var(--foreground));
+}
+
+.sidebar-camera-search-clear svg {
+    width: 0.8rem;
+    height: 0.8rem;
+}
+
+/* Name with what the search matched (IP or RTSP link) below it */
+.sidebar-camera-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.15;
+}
+
+.sidebar-camera-match {
+    overflow: hidden;
+    color: hsl(var(--muted-foreground));
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.66rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}

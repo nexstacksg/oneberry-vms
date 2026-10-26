@@ -16,6 +16,7 @@ import { EditUserModal } from './users/EditUserModal.jsx';
 import { getAuthHeaders, isDemoMode, validateSession } from '../../utils/auth-utils.js';
 import { navigateToAppPage } from '../../utils/navigation-utils.js';
 import { getStreamStatusKind } from '../../utils/building-hierarchy.js';
+import { matchCameraSearch, parseCameraSearch } from '../../utils/camera-search-utils.js';
 import { preloadLiveSnapshots, startLiveWarmup } from '../../utils/live-warmup.js';
 import { useI18n } from '../../i18n.js';
 import LanguageSelector from './common/LanguageSelector.jsx';
@@ -106,6 +107,7 @@ const SidebarCameraRow = memo(({
   onDelete,
   inFolder = false,
   onRemoveFromFolder,
+  matchHint = '',
 }) => (
   <li className={`sidebar-camera-node ${isActive ? 'is-active' : ''} ${isSelected ? 'is-selected' : ''} ${menuOpen ? 'is-menu-open' : ''} ${inFolder ? 'is-in-folder' : ''}`} role="presentation">
     <a
@@ -126,7 +128,15 @@ const SidebarCameraRow = memo(({
       <span className="sidebar-camera-select-indicator" aria-hidden="true"></span>
       <span className={`sidebar-camera-status is-${statusKind}`} aria-hidden="true"></span>
       <TreeIcon type="camera" />
-      <span className="sidebar-camera-name">{cameraName}</span>
+      {matchHint ? (
+        // Found by IP address or RTSP link: show what matched under the name
+        <span className="sidebar-camera-text">
+          <span className="sidebar-camera-name">{cameraName}</span>
+          <span className="sidebar-camera-match" title={matchHint}>{matchHint}</span>
+        </span>
+      ) : (
+        <span className="sidebar-camera-name">{cameraName}</span>
+      )}
     </a>
     {canManage && (
       <div className="sidebar-layout-menu-wrap sidebar-camera-menu-wrap" onClick={(event) => event.stopPropagation()}>
@@ -408,6 +418,8 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
   // Camera folders (saved server-side via /api/camera-folders)
   const [cameraFolders, setCameraFolders] = useState([]);
   const [collapsedFolderIds, setCollapsedFolderIds] = useState(getStoredCollapsedFolderIds);
+  // Camera list search (name, IP address, RTSP link)
+  const [cameraSearch, setCameraSearch] = useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [folderToDelete, setFolderToDelete] = useState(null);
@@ -524,20 +536,51 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
 
   // Folders with their (visible) cameras, the cameras not in any folder, and
   // the on-screen order used for keyboard navigation
-  const cameraFolderView = useMemo(() => cameraFolders.map((folder) => ({
+  const cameraSearchTerms = useMemo(() => parseCameraSearch(cameraSearch), [cameraSearch]);
+  const isSearchingCameras = cameraSearchTerms.length > 0;
+  // What each camera matched (name / IP / RTSP link); missing = no match
+  const cameraSearchMatches = useMemo(() => {
+    const matches = new Map();
+    sidebarCameraList.forEach((stream) => {
+      const match = matchCameraSearch(stream, cameraSearchTerms);
+      if (match) matches.set(stream.name, match);
+    });
+    return matches;
+  }, [cameraSearchTerms, sidebarCameraList]);
+  const allCameraFolders = useMemo(() => cameraFolders.map((folder) => ({
     ...folder,
     streams: (folder.cameras || []).map((name) => streamByName.get(name)).filter(Boolean),
   })), [cameraFolders, streamByName]);
   const camerasInFolders = useMemo(() => new Set(
-    cameraFolderView.flatMap((folder) => folder.streams.map((stream) => stream.name))
-  ), [cameraFolderView]);
+    allCameraFolders.flatMap((folder) => folder.streams.map((stream) => stream.name))
+  ), [allCameraFolders]);
+  // While searching: only matching cameras, in folders that have any (a folder
+  // whose name matches shows all its cameras), folders opened
+  const cameraFolderView = useMemo(() => {
+    if (!isSearchingCameras) return allCameraFolders;
+    return allCameraFolders
+      .map((folder) => {
+        const folderName = String(folder.name || '').toLowerCase();
+        const folderMatches = cameraSearchTerms.every((term) => folderName.includes(term));
+        return folderMatches
+          ? folder
+          : { ...folder, streams: folder.streams.filter((stream) => cameraSearchMatches.has(stream.name)) };
+      })
+      .filter((folder) => folder.streams.length > 0);
+  }, [allCameraFolders, cameraSearchMatches, cameraSearchTerms, isSearchingCameras]);
+  const isCameraFolderCollapsed = useCallback((folderId) => (
+    !isSearchingCameras && collapsedFolderIds.has(folderId)
+  ), [collapsedFolderIds, isSearchingCameras]);
   const ungroupedSidebarCameras = useMemo(() => (
-    sidebarCameraList.filter((stream) => !camerasInFolders.has(stream.name))
-  ), [camerasInFolders, sidebarCameraList]);
+    sidebarCameraList.filter((stream) => (
+      !camerasInFolders.has(stream.name) && (!isSearchingCameras || cameraSearchMatches.has(stream.name))
+    ))
+  ), [cameraSearchMatches, camerasInFolders, isSearchingCameras, sidebarCameraList]);
   const navigableSidebarCameras = useMemo(() => [
-    ...cameraFolderView.flatMap((folder) => (collapsedFolderIds.has(folder.id) ? [] : folder.streams)),
+    ...cameraFolderView.flatMap((folder) => (isCameraFolderCollapsed(folder.id) ? [] : folder.streams)),
     ...ungroupedSidebarCameras,
-  ], [cameraFolderView, collapsedFolderIds, ungroupedSidebarCameras]);
+  ], [cameraFolderView, isCameraFolderCollapsed, ungroupedSidebarCameras]);
+  const visibleCameraCount = useMemo(() => new Set(navigableSidebarCameras.map((stream) => stream.name)).size, [navigableSidebarCameras]);
   const selectedCameraNameList = useMemo(() => (
     sidebarCameraList
       .map((stream) => stream.name)
@@ -1718,12 +1761,13 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
         onDelete={deleteCameraFromSidebar}
         inFolder={inFolder}
         onRemoveFromFolder={removeCameraFromFolder}
+        matchHint={isSearchingCameras ? (cameraSearchMatches.get(stream.name)?.hint || '') : ''}
       />
     );
   };
 
   const renderCameraFolder = (folder) => {
-    const expanded = !collapsedFolderIds.has(folder.id);
+    const expanded = !isCameraFolderCollapsed(folder.id);
     const menuKey = `folder:${folder.id}`;
     const isEmpty = folder.streams.length === 0;
     return (
@@ -1821,7 +1865,7 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
       </form>
     );
 
-    if (sidebarCameraList.length === 0 && cameraFolderView.length === 0) {
+    if (sidebarCameraList.length === 0 && allCameraFolders.length === 0) {
       return (
         <>
           {createFolderForm}
@@ -1830,8 +1874,63 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
       );
     }
 
+    const searchBox = (
+      <div className="sidebar-camera-search" role="search">
+        <svg className="sidebar-camera-search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" strokeWidth="1.5" />
+          <path d="M10.5 10.5L14 14" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+        <input
+          type="search"
+          value={cameraSearch}
+          placeholder="Search name, IP or RTSP"
+          aria-label="Search cameras by name, IP address or RTSP link"
+          data-testid="sidebar-camera-search"
+          autoComplete="off"
+          spellCheck={false}
+          onInput={(event) => setCameraSearch(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              setCameraSearch('');
+              event.currentTarget.blur();
+            } else if (event.key === 'ArrowDown') {
+              // Down arrow moves into the list of results
+              event.preventDefault();
+              event.currentTarget.closest('#sidebar-camera-list-panel')?.querySelector('.sidebar-live-camera-list')?.focus();
+            }
+          }}
+        />
+        {cameraSearch && (
+          <button
+            type="button"
+            className="sidebar-camera-search-clear"
+            aria-label="Clear search"
+            title="Clear search"
+            onClick={() => setCameraSearch('')}
+          >
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+              <path strokeLinecap="round" strokeWidth="1.6" d="M4.5 4.5l7 7M11.5 4.5l-7 7" />
+            </svg>
+          </button>
+        )}
+      </div>
+    );
+
+    if (isSearchingCameras && visibleCameraCount === 0) {
+      return (
+        <>
+          {searchBox}
+          <div className="sidebar-building-empty" data-testid="sidebar-camera-search-empty">
+            No cameras match "{cameraSearch.trim()}"
+          </div>
+        </>
+      );
+    }
+
     return (
       <>
+        {searchBox}
         {createFolderForm}
         <ul
           className="sidebar-camera-tree sidebar-live-camera-list"
@@ -1960,7 +2059,9 @@ export function Header({ version = VERSION, activeNav: activeNavProp }) {
           onClick={() => setCameraListCollapsed((collapsed) => !collapsed)}
         >
           <span className="sidebar-section-label">Camera List</span>
-          <span className="sidebar-tree-count">{sidebarCameraList.length}</span>
+          <span className="sidebar-tree-count" data-testid="sidebar-camera-count">
+            {isSearchingCameras ? `${visibleCameraCount}/${sidebarCameraList.length}` : sidebarCameraList.length}
+          </span>
           <span className="sidebar-tree-toggle" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 6l6 6-6 6" />
