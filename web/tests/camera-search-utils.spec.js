@@ -59,4 +59,11 @@ describe('camera search', () => {
     expect(search('cam', { name: 'cam-55' })).toEqual({ field: 'name', hint: '' });
     expect(search('172', { name: 'cam-55' })).toBeNull();
   });
+
+  it('finds by tag', () => {
+    const tagged = { ...camera, tags: 'outdoor, gate' };
+    expect(search('outdoor', tagged)).toEqual({ field: 'tag', hint: '#outdoor' });
+    expect(search('lobby gate', tagged)).toEqual({ field: 'tag', hint: '#gate' });
+    expect(search('indoor', tagged)).toBeNull();
+  });
 });

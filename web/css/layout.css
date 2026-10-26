@@ -1699,3 +1699,8 @@ th {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+/* Manage Cameras search: our own clear button */
+.streams-search-input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+}

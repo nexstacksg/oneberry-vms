@@ -34,6 +34,7 @@ import {
 } from '../../query-client.js';
 import { useI18n } from '../../i18n.js';
 import { useSortableData } from './useSortableData.js';
+import { matchCameraSearch, parseCameraSearch } from '../../utils/camera-search-utils.js';
 
 function buildStreamFormState(stream, motion, {
   name = stream.name || '',
@@ -371,9 +372,13 @@ export function StreamsView() {
     if (selectedStreams.size > 0) {
       setSelectedStreams(new Set());
     } else {
-      setSelectedStreams(new Set((streams || []).map(s => s.name)));
+      // Only the cameras shown (all of them, or those matching the search)
+      setSelectedStreams(new Set((visibleStreamsRef.current || []).map(s => s.name)));
     }
   };
+  // Camera search (name, IP address, RTSP link, tags)
+  const [streamSearch, setStreamSearch] = useState('');
+  const visibleStreamsRef = useRef([]);
 
   // Accordion expanded state for StreamConfigModal sections
   const [expandedSections, setExpandedSections] = useState({
@@ -566,6 +571,22 @@ export function StreamsView() {
     fps: (stream) => stream.fps || 0,
     recording: (stream) => stream.record ? 1 : 0,
   });
+  const streamSearchTerms = parseCameraSearch(streamSearch);
+  const isSearchingStreams = streamSearchTerms.length > 0;
+  const visibleStreams = isSearchingStreams
+    ? sortedStreams.filter(stream => matchCameraSearch(stream, streamSearchTerms))
+    : sortedStreams;
+  visibleStreamsRef.current = visibleStreams;
+
+  // Bulk actions only apply to cameras that are shown
+  useEffect(() => {
+    if (!isSearchingStreams) return;
+    const shown = new Set(visibleStreamsRef.current.map(stream => stream.name));
+    setSelectedStreams(previous => {
+      const next = new Set([...previous].filter(name => shown.has(name)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [streamSearch, streams]);
 
   // Default stream state
   const [currentStream, setCurrentStream] = useState({
@@ -2741,12 +2762,51 @@ export function StreamsView() {
           )}
           <div className="flex flex-col gap-3 border-b border-border px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <div className="text-sm font-semibold text-foreground">
-                {sortedStreams.length} {sortedStreams.length === 1 ? 'stream' : 'streams'}
+              <div className="text-sm font-semibold text-foreground" data-testid="streams-count">
+                {isSearchingStreams
+                  ? `${visibleStreams.length} of ${sortedStreams.length} ${sortedStreams.length === 1 ? 'stream' : 'streams'}`
+                  : `${sortedStreams.length} ${sortedStreams.length === 1 ? 'stream' : 'streams'}`}
               </div>
               <div className="mt-0.5 text-xs text-muted-foreground">
                 {streamsViewMode === 'grid' ? 'Card view for quick scanning' : 'Table view for dense comparison'}
               </div>
+            </div>
+            {/* Search by name, IP address, RTSP link or tag (never by password) */}
+            <div className="relative w-full lg:max-w-md lg:flex-1" role="search">
+              <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+                <circle cx="7" cy="7" r="4.5" strokeWidth="1.5" />
+                <path d="M10.5 10.5L14 14" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+              <input
+                type="search"
+                value={streamSearch}
+                onInput={e => setStreamSearch(e.currentTarget.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setStreamSearch('');
+                  }
+                }}
+                placeholder="Search name, IP, RTSP link or tag"
+                aria-label="Search cameras by name, IP address, RTSP link or tag"
+                data-testid="streams-search"
+                autoComplete="off"
+                spellCheck={false}
+                className="streams-search-input h-9 w-full rounded-md border border-input bg-background pl-9 pr-9 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/60"
+              />
+              {streamSearch && (
+                <button
+                  type="button"
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  aria-label="Clear search"
+                  title="Clear search"
+                  onClick={() => setStreamSearch('')}
+                >
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+                    <path strokeLinecap="round" strokeWidth="1.6" d="M4.5 4.5l7 7M11.5 4.5l-7 7" />
+                  </svg>
+                </button>
+              )}
             </div>
             <div className="inline-flex w-fit rounded-md border border-border bg-muted/30 p-1">
               <button
@@ -2793,8 +2853,8 @@ export function StreamsView() {
                     <input
                       type="checkbox"
                       className="w-4 h-4 rounded cursor-pointer"
-                      checked={selectedStreams.size > 0 && selectedStreams.size === (sortedStreams || []).length}
-                      ref={el => { if (el) el.indeterminate = selectedStreams.size > 0 && selectedStreams.size < (sortedStreams || []).length; }}
+                      checked={selectedStreams.size > 0 && selectedStreams.size === (visibleStreams || []).length}
+                      ref={el => { if (el) el.indeterminate = selectedStreams.size > 0 && selectedStreams.size < (visibleStreams || []).length; }}
                       onChange={toggleSelectAll}
                       title={t('streams.selectAll')}
                     />
@@ -2827,7 +2887,15 @@ export function StreamsView() {
               </tr>
               </thead>
               <tbody className="bg-card divide-y divide-border">
-              {sortedStreams.map(stream => {
+              {isSearchingStreams && visibleStreams.length === 0 && (
+                <tr>
+                  <td colSpan={(canModifyStreams && selectionMode ? 1 : 0) + 8} className="text-sm text-muted-foreground" style={{ padding: '2.5rem 1.5rem', textAlign: 'center' }} data-testid="streams-search-empty">
+                    No cameras match "{streamSearch.trim()}".{' '}
+                    <button type="button" className="font-medium text-primary hover:underline" onClick={() => setStreamSearch('')}>Clear search</button>
+                  </td>
+                </tr>
+              )}
+              {visibleStreams.map(stream => {
                 const isExpanded = expandedStreams[stream.name];
                 const statusColor =
                   stream.status === 'Running'      ? 'hsl(var(--success))' :
@@ -3088,7 +3156,13 @@ export function StreamsView() {
           </div>
           ) : (
           <div id="streams-grid" className="grid gap-4 p-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-            {sortedStreams.map(stream => renderStreamGridCard(stream))}
+            {isSearchingStreams && visibleStreams.length === 0 && (
+              <div className="col-span-full text-sm text-muted-foreground" style={{ padding: '2.5rem 1rem', textAlign: 'center' }} data-testid="streams-search-empty">
+                No cameras match "{streamSearch.trim()}".{' '}
+                <button type="button" className="font-medium text-primary hover:underline" onClick={() => setStreamSearch('')}>Clear search</button>
+              </div>
+            )}
+            {visibleStreams.map(stream => renderStreamGridCard(stream))}
           </div>
           )}
         </div>
