@@ -299,6 +299,11 @@
 }
 
 .timeline-player-container.timeline-player-stage .timeline-video-surface video {
+    /* Pinned to the player box: a tall (portrait) recording must not make
+       the video taller than the box, or the box cuts it off. The whole
+       picture is shown, with black bars beside it. */
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
     object-fit: contain;
