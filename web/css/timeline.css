@@ -551,3 +551,101 @@
         font-size: 14px;
     }
 }
+
+/* Timeline Playback header on one line: title + summary, then camera and date */
+.timeline-header-inline {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+    padding: 0.5rem 0.75rem 0.5rem 1rem;
+}
+
+.timeline-header-title {
+    display: flex;
+    flex: 1 1 0;
+    align-items: baseline;
+    gap: 0.75rem;
+    min-width: 0;
+}
+
+.timeline-header-title h1 {
+    flex: 0 0 auto;
+    margin: 0;
+    color: hsl(var(--foreground));
+    font-size: 1rem;
+    font-weight: 650;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
+.timeline-header-meta {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    color: hsl(var(--muted-foreground));
+    font-size: 0.75rem;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.timeline-header-camera {
+    color: hsl(var(--foreground) / 0.8);
+    font-weight: 600;
+}
+
+.timeline-header-sep {
+    margin: 0 0.35rem;
+    opacity: 0.45;
+}
+
+.timeline-header-controls {
+    display: flex;
+    flex: 0 1 auto;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.timeline-header-controls select {
+    width: clamp(9rem, 20vw, 15rem);
+    border-radius: 0.5rem;
+}
+
+/* The date keeps its width; the camera list gives way */
+.timeline-header-date {
+    flex: 0 0 auto;
+}
+
+.timeline-header-date button {
+    white-space: nowrap;
+}
+
+.timeline-header-loading {
+    color: hsl(var(--muted-foreground));
+    font-size: 0.75rem;
+    font-style: italic;
+}
+
+@media (max-width: 768px) {
+    .timeline-header-inline {
+        flex-wrap: wrap;
+    }
+
+    .timeline-header-title {
+        flex-wrap: wrap;
+        row-gap: 0.15rem;
+    }
+
+    .timeline-header-controls {
+        flex: 1 1 100%;
+    }
+
+    .timeline-header-controls select {
+        flex: 1 1 auto;
+        width: auto;
+        min-width: 0;
+        max-width: none;
+    }
+}

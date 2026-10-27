@@ -1383,6 +1383,7 @@ export function TimelinePage() {
         </div>
       </div>
 
+      {idsMode ? (
       <div className="timeline-review-header mb-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
         <div className="timeline-review-header-row flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 text-left">
@@ -1401,8 +1402,7 @@ export function TimelinePage() {
           </div>
         </div>
 
-      {idsMode ? (
-        /* IDs mode: compact info bar */
+        {/* IDs mode: compact info bar */}
         <div className="timeline-filter-bar mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
           <span className="font-medium">
             {t('timeline.recordingsCount', { count: segments.length })}
@@ -1468,15 +1468,30 @@ export function TimelinePage() {
             </button>
           </div>
         </div>
+      </div>
       ) : (
-        /* Normal mode: compact single-row stream + date selectors */
-        <div className="timeline-filter-bar mt-4 grid gap-3 px-3 py-3 md:grid-cols-[minmax(16rem,28rem)_auto_1fr] md:items-end">
-          <div className="min-w-[180px] max-w-xl">
-            <label htmlFor="stream-selector" className="mb-1 block text-xs font-medium uppercase tracking-[0.08em] text-slate-500">{t('nav.streams')}</label>
+        /* Normal mode: title, summary, camera and date on one line */
+        <div className="timeline-review-header timeline-header-inline mb-3 rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="timeline-header-title">
+            <h1>{t('timeline.timelinePlayback')}</h1>
+            <span className="timeline-header-meta" data-testid="timeline-header-meta">
+              <span>{formatDisplayDate(selectedDate)}</span>
+              {selectedStream && <span className="timeline-header-sep">/</span>}
+              {selectedStream && <span className="timeline-header-camera">{selectedStream}</span>}
+              {segments.length > 0 && <span className="timeline-header-sep">/</span>}
+              {segments.length > 0 && <span>{t('timeline.recordingsCount', { count: segments.length })}</span>}
+            </span>
+          </div>
+          <div className="timeline-header-controls">
+            {isLoadingTimeline && (
+              <span className="timeline-header-loading">{t('common.loading')}</span>
+            )}
             <select
               id="stream-selector"
               data-keyboard-nav-preserve
-              className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 shadow-sm outline-none transition-colors focus:border-red-500 focus:ring-2 focus:ring-red-500/15"
+              aria-label={t('nav.streams')}
+              title={t('nav.streams')}
+              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 shadow-sm outline-none transition-colors focus:border-red-500 focus:ring-2 focus:ring-red-500/15"
               value={selectedStream || ''}
               onChange={handleStreamChange}
             >
@@ -1485,17 +1500,12 @@ export function TimelinePage() {
                 <option key={stream.name} value={stream.name}>{stream.name}</option>
               ))}
             </select>
+            <div className="timeline-header-date" data-keyboard-nav-preserve aria-label={t('timeline.date')}>
+              <CalendarPicker value={selectedDate} onChange={handleDateChange} />
+            </div>
           </div>
-          <div className="min-w-[170px]" data-keyboard-nav-preserve>
-            <label className="mb-1 block text-xs font-medium uppercase tracking-[0.08em] text-slate-500">{t('timeline.date')}</label>
-            <CalendarPicker value={selectedDate} onChange={handleDateChange} />
-          </div>
-          {isLoadingTimeline && (
-            <span className="self-center text-xs text-muted-foreground italic md:justify-self-end">{t('common.loading')}</span>
-          )}
         </div>
       )}
-      </div>
 
       {/* Content */}
       {renderContent()}
