@@ -2241,3 +2241,8 @@ body.is-scene-resizing-nesw * {
 .live-workspace-tile-kept-alive {
     display: none !important;
 }
+
+/* Zoomed out past "fit": the layout springs back to fit the view */
+.live-scene-viewport.is-fitting-back .video-container.is-workspace-grid {
+    transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}

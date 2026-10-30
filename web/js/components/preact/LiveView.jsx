@@ -63,7 +63,9 @@ const MAX_KEPT_ALIVE_TABS = 4;
 const MAX_KEPT_ALIVE_CAMERAS = 36;
 const LIVE_CELL_SPACING_STORAGE_KEY = 'lightnvr-live-cell-spacing';
 // Mouse wheel zoom range: below 1 shows free grid around the cameras (Nx Witness)
-const SCENE_MIN_ZOOM = 0.4;
+// Zooming out stops a little past "fit" and springs back (Nx Witness style)
+const SCENE_MIN_ZOOM = 0.7;
+const SCENE_FIT_BACK_DELAY_MS = 900;
 const SCENE_MAX_ZOOM = 6;
 // Live View scene (Nx Witness style): tiles sit in whole cells and the scene is
 // as large as they need; these are the most it may grow to in each direction.
@@ -660,6 +662,14 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   // Scene zoom and pan (mouse wheel / drag on empty space), like Nx Witness
   const [sceneZoom, setSceneZoom] = useState({ scale: 1, x: 0, y: 0 });
   const sceneZoomRef = useRef(sceneZoom);
+  // Zoomed out past "fit": animate back to the whole layout, centred
+  const springBackToFit = () => {
+    if (sceneZoomRef.current.scale >= 1) return;
+    const viewport = sceneViewportRef.current;
+    viewport?.classList.add('is-fitting-back');
+    window.setTimeout(() => viewport?.classList.remove('is-fitting-back'), 360);
+    setSceneZoom({ scale: 1, x: 0, y: 0 });
+  };
   sceneZoomRef.current = sceneZoom;
   const sceneViewportRef = useRef(null);
   const [tileDropTargetId, setTileDropTargetId] = useState('');
@@ -693,6 +703,7 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
   const getCameraAspectRef = useRef(() => null);
   const workspaceLockedRef = useRef(false);
   const wheelSpacingAtRef = useRef(0);
+  const fitBackTimerRef = useRef(null);
   const workspaceAutoExpandedDropRef = useRef(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [layoutPresetMenuOpen, setLayoutPresetMenuOpen] = useState(false);
@@ -2153,6 +2164,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
     setGridOverlay(null);
     document.body.classList.remove('is-scene-resizing-nwse', 'is-scene-resizing-nesw');
     workspacePointerRef.current = null;
+    // Zoomed out to drop a camera next to the layout: back to fit now
+    if (sceneZoomRef.current.scale < 1) window.setTimeout(springBackToFit, 120);
     window.removeEventListener('pointermove', handleWorkspacePointerMove);
     window.removeEventListener('pointerup', finishWorkspacePointer);
     window.removeEventListener('pointercancel', finishWorkspacePointer);
@@ -2178,6 +2191,8 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
 
     event.preventDefault();
     event.stopPropagation();
+    // Zoomed out to reach free cells: stay zoomed out until the camera is dropped
+    window.clearTimeout(fitBackTimerRef.current);
     if (mode === 'resize') {
       setWorkspaceAutoGrid(false);
     }
@@ -2879,9 +2894,18 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       const rect = viewport.getBoundingClientRect();
       const pointerX = event.clientX - rect.left;
       const pointerY = event.clientY - rect.top;
+      // Past "fit" the view resists and springs back once the wheel stops
+      window.clearTimeout(fitBackTimerRef.current);
+      fitBackTimerRef.current = window.setTimeout(() => {
+        // While a camera is moved or resized it springs back on release
+        if (!workspacePointerRef.current) springBackToFit();
+      }, SCENE_FIT_BACK_DELAY_MS);
       setSceneZoom((previous) => {
-        const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const zoomingOut = event.deltaY > 0;
+        const factor = !zoomingOut ? 1.15 : (previous.scale <= 1 ? 1 / 1.06 : 1 / 1.15);
         let scale = Math.max(SCENE_MIN_ZOOM, Math.min(SCENE_MAX_ZOOM, previous.scale * factor));
+        // Zooming out from a zoomed-in view stops at "fit" first
+        if (zoomingOut && previous.scale > 1 && scale < 1) scale = 1;
         if (Math.abs(scale - 1) < 0.04) scale = 1;
         if (scale === 1) return { scale: 1, x: 0, y: 0 };
         // Keep the point under the pointer where it is
@@ -2894,7 +2918,10 @@ export function LiveView({ isWebRTCDisabled, mode = 'hls' }) {
       });
     };
     viewport.addEventListener('wheel', handleWheel, { passive: false });
-    return () => viewport.removeEventListener('wheel', handleWheel);
+    return () => {
+      viewport.removeEventListener('wheel', handleWheel);
+      window.clearTimeout(fitBackTimerRef.current);
+    };
   }, [captureTileRects, isMobileViewport, isWorkspaceMode]);
 
   // Zoom resets when another layout is opened
