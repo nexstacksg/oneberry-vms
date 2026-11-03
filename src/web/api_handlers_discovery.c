@@ -31,6 +31,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include "utils/poll_wait.h"
 
 #define MAX_UNIVERSAL_DEVICES 128
 #define MAX_SCAN_HOSTS 1024
@@ -370,26 +371,21 @@ static int scan_rtsp_port_batch(uint32_t network_addr, uint64_t start_offset, ui
         return 0;
     }
 
-    fd_set writefds;
-    FD_ZERO(&writefds);
-    int max_fd = -1;
+    // poll(), not select(): socket numbers can be above FD_SETSIZE with many cameras
+    struct pollfd pfds[MAX_RTSP_BATCH_PROBES];
     for (int i = 0; i < probe_count; i++) {
-        if (probes[i].sock >= 0) {
-            FD_SET(probes[i].sock, &writefds);
-            if (probes[i].sock > max_fd) {
-                max_fd = probes[i].sock;
-            }
-        }
+        pfds[i].fd = probes[i].sock;  // negative fds are ignored by poll()
+        pfds[i].events = POLLOUT;
+        pfds[i].revents = 0;
     }
 
-    struct timeval tv;
-    tv.tv_sec = RTSP_DISCOVERY_CONNECT_TIMEOUT_MS / 1000;
-    tv.tv_usec = (long)(RTSP_DISCOVERY_CONNECT_TIMEOUT_MS % 1000) * 1000;
-
-    int ready = select(max_fd + 1, NULL, &writefds, NULL, &tv);
+    int ready;
+    do {
+        ready = poll(pfds, (nfds_t)probe_count, RTSP_DISCOVERY_CONNECT_TIMEOUT_MS);
+    } while (ready < 0 && errno == EINTR);
     if (ready > 0) {
         for (int i = 0; i < probe_count; i++) {
-            if (probes[i].sock < 0 || !FD_ISSET(probes[i].sock, &writefds)) {
+            if (probes[i].sock < 0 || !(pfds[i].revents & (POLLOUT | POLLERR | POLLHUP))) {
                 continue;
             }
 
@@ -622,13 +618,10 @@ int discovery_rtsp_options_check(const char *ip, int port, int timeout_ms,
         return -1;
     }
     if (rc < 0) {
-        fd_set wfds;
-        FD_ZERO(&wfds);
-        FD_SET(sock, &wfds);
-        struct timeval ctv = tv;
+        int connect_timeout_ms = (int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
         int so_error = 0;
         socklen_t len = sizeof(so_error);
-        if (select(sock + 1, NULL, &wfds, NULL, &ctv) <= 0 ||
+        if (poll_wait_fd(sock, POLLOUT, connect_timeout_ms) <= 0 ||
             getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) != 0 || so_error != 0) {
             close(sock);
             return -1;

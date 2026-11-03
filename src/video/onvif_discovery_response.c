@@ -14,6 +14,7 @@
 #include <time.h>
 #include <stdbool.h>
 #include <netinet/ip.h>
+#include "utils/poll_wait.h"
 
 // Helper function to extract content between XML tags
 static char* extract_xml_content(const char *xml, const char *tag_start, const char *tag_end, char *buffer, size_t buffer_size) {
@@ -246,7 +247,6 @@ int receive_discovery_responses(onvif_device_info_t *devices, int max_devices) {
         log_error("Failed to allocate memory for receive buffer");
         return -1;
     }
-    fd_set readfds;
     struct timeval timeout;
     
     log_info("Setting up socket to receive discovery responses");
@@ -388,10 +388,7 @@ int receive_discovery_responses(onvif_device_info_t *devices, int max_devices) {
     for (int i = 0; i < 2; i++) {
         log_info("Waiting for responses, attempt %d/2", i+1);
         
-        FD_ZERO(&readfds);
-        FD_SET(sock, &readfds);
-        
-        ret = select(sock + 1, &readfds, NULL, NULL, &timeout);
+        ret = poll_wait_fd(sock, POLLIN, (int)(timeout.tv_sec * 1000 + timeout.tv_usec / 1000));
         if (ret < 0) {
             log_error("Select failed: %s", strerror(errno));
             close(sock);
@@ -524,7 +521,6 @@ int receive_extended_discovery_responses(onvif_device_info_t *devices, int max_d
         log_error("Failed to allocate memory for receive buffer");
         return -1;
     }
-    fd_set readfds;
     struct timeval timeout;
 
     log_info("Setting up socket to receive discovery responses (extended timeouts)");
@@ -637,14 +633,11 @@ int receive_extended_discovery_responses(onvif_device_info_t *devices, int max_d
     for (int attempt = 0; attempt < max_attempts; attempt++) {
         log_info("Waiting for responses, attempt %d/%d", attempt+1, max_attempts);
 
-        FD_ZERO(&readfds);
-        FD_SET(sock, &readfds);
-
         // Reset timeout for each attempt
         timeout.tv_sec = timeout_sec;
         timeout.tv_usec = 0;
 
-        ret = select(sock + 1, &readfds, NULL, NULL, &timeout);
+        ret = poll_wait_fd(sock, POLLIN, (int)(timeout.tv_sec * 1000 + timeout.tv_usec / 1000));
 
         if (ret < 0) {
             log_error("Select failed: %s", strerror(errno));

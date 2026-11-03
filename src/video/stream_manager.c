@@ -81,40 +81,15 @@ static stream_t *streams = NULL;
 static int streams_capacity = 0;  // actual allocated slot count
 static bool initialized = false;
 
+// The stream array is allocated once for MAX_STREAMS cameras and never moved:
+// stream handles are pointers into it and each slot holds a mutex that other
+// threads may be using, so reallocating it while cameras run is not safe.
 static int ensure_stream_manager_capacity(int min_capacity) {
     if (min_capacity <= streams_capacity) {
         return 0;
     }
-
-    int old_capacity = streams_capacity;
-    int new_capacity = old_capacity > 0 ? old_capacity : 1;
-    while (new_capacity < min_capacity) {
-        if (new_capacity > INT_MAX / 2) {
-            new_capacity = min_capacity;
-            break;
-        }
-        new_capacity *= 2;
-    }
-
-    stream_t *expanded = realloc(streams, (size_t)new_capacity * sizeof(stream_t));
-    if (!expanded) {
-        log_error("Failed to expand stream manager capacity from %d to %d",
-                  old_capacity, new_capacity);
-        return -1;
-    }
-
-    streams = expanded;
-    memset(&streams[old_capacity], 0, (size_t)(new_capacity - old_capacity) * sizeof(stream_t));
-    for (int i = old_capacity; i < new_capacity; i++) {
-        pthread_mutex_init(&streams[i].mutex, NULL);
-        streams[i].status = STREAM_STATUS_STOPPED;
-        memset(&streams[i].stats, 0, sizeof(stream_stats_t));
-        streams[i].recording_enabled = false;
-        streams[i].detection_recording_enabled = false;
-    }
-    streams_capacity = new_capacity;
-    log_info("Stream manager capacity expanded to %d slots", streams_capacity);
-    return 0;
+    log_error("Camera limit reached: no free stream slot (%d cameras supported)", streams_capacity);
+    return -1;
 }
 
 // Schedule monitor thread state
@@ -232,15 +207,15 @@ int init_stream_manager(int max_streams) {
         return 0;  // Already initialized
     }
 
-    if (max_streams < 1) max_streams = 1;
+    (void)max_streams;  // the array is always sized for MAX_STREAMS cameras
 
-    // Allocate the stream array dynamically
-    streams = calloc(max_streams, sizeof(stream_t));
+    // Allocate the stream array once (see ensure_stream_manager_capacity)
+    streams = calloc(MAX_STREAMS, sizeof(stream_t));
     if (!streams) {
-        log_error("init_stream_manager: failed to allocate stream array (%d slots)", max_streams);
+        log_error("init_stream_manager: failed to allocate stream array (%d slots)", MAX_STREAMS);
         return -1;
     }
-    streams_capacity = max_streams;
+    streams_capacity = MAX_STREAMS;
 
     // Initialise each slot
     for (int i = 0; i < streams_capacity; i++) {

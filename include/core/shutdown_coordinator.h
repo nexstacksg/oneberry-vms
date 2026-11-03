@@ -5,8 +5,11 @@
 #include <stdbool.h>
 #include <pthread.h>
 
-// Maximum number of components that can register with the coordinator
-#define MAX_COMPONENTS 32
+#include "core/config.h"
+
+// Maximum number of components that can register with the coordinator:
+// each camera registers an HLS writer and an MP4 writer, plus spare
+#define MAX_COMPONENTS (MAX_STREAMS * 2 + 64)
 
 // Component states
 typedef enum {

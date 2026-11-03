@@ -40,7 +40,9 @@
 #include "storage/storage_manager_streams_cache.h"
 #include "telemetry/stream_metrics.h"
 
-#define ROTATION_LATE_WARN_MS 100
+// A few hundred ms late is normal with hundreds of cameras; warn only when a
+// rotation is clearly delayed (otherwise the log fills with harmless errors)
+#define ROTATION_LATE_WARN_MS 2000
 
 static time_t align_segment_start(time_t timestamp, int segment_duration) {
     if (segment_duration <= 0) {
@@ -105,7 +107,7 @@ static void log_rotation_event(const char *stream_name,
     format_utc_time(actual_time, actual_buf, sizeof(actual_buf));
 
     if (delay_ms > ROTATION_LATE_WARN_MS) {
-        log_error("recording.rotation_late stream=%s scheduled=%s actual=%s delay_ms=%lld reason=%s",
+        log_warn("recording.rotation_late stream=%s scheduled=%s actual=%s delay_ms=%lld reason=%s",
                   stream_name ? stream_name : "unknown",
                   scheduled_buf,
                   actual_buf,

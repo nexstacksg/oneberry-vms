@@ -42,6 +42,7 @@
 #include "video/onvif_device_management.h"
 #include "video/onvif_discovery.h"
 #include "video/onvif_soap.h"
+#include "utils/poll_wait.h"
 
 #undef LOG_COMPONENT
 #define LOG_COMPONENT "SubnetScan"
@@ -171,26 +172,29 @@ static void probe_tcp_batch(uint32_t start, uint32_t end, int port, bool *open) 
     clock_gettime(CLOCK_MONOTONIC, &deadline);
     long deadline_ms = deadline.tv_sec * 1000L + deadline.tv_nsec / 1000000L + SUBNET_SCAN_CONNECT_TIMEOUT_MS;
     for (;;) {
-        fd_set wfds;
-        FD_ZERO(&wfds);
-        int max_fd = -1;
+        // poll(), not select(): socket numbers can be above FD_SETSIZE with many cameras
+        struct pollfd pfds[SUBNET_SCAN_MAX_CONCURRENCY];
+        int waiting = 0;
         for (int i = 0; i < count; i++) {
-            if (socks[i] >= 0) {
-                FD_SET(socks[i], &wfds);
-                if (socks[i] > max_fd) max_fd = socks[i];
-            }
+            pfds[i].fd = socks[i];  // negative fds are ignored by poll()
+            pfds[i].events = POLLOUT;
+            pfds[i].revents = 0;
+            if (socks[i] >= 0) waiting++;
         }
-        if (max_fd < 0) break;
+        if (waiting == 0) break;
 
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         long remaining = deadline_ms - (now.tv_sec * 1000L + now.tv_nsec / 1000000L);
         if (remaining <= 0) break;
-        struct timeval tv = { .tv_sec = remaining / 1000, .tv_usec = (remaining % 1000) * 1000 };
-        if (select(max_fd + 1, NULL, &wfds, NULL, &tv) <= 0) break;
+        int ready;
+        do {
+            ready = poll(pfds, (nfds_t)count, (int)remaining);
+        } while (ready < 0 && errno == EINTR);
+        if (ready <= 0) break;
 
         for (int i = 0; i < count; i++) {
-            if (socks[i] >= 0 && FD_ISSET(socks[i], &wfds)) {
+            if (socks[i] >= 0 && (pfds[i].revents & (POLLOUT | POLLERR | POLLHUP))) {
                 int so_error = 0;
                 socklen_t len = sizeof(so_error);
                 getsockopt(socks[i], SOL_SOCKET, SO_ERROR, &so_error, &len);

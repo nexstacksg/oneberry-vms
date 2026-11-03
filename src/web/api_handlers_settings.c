@@ -1797,6 +1797,7 @@ void handle_post_settings(const http_request_t *req, http_response_t *res) {
     if (max_streams_j && cJSON_IsNumber(max_streams_j)) {
         int new_max = max_streams_j->valueint;
         if (new_max < 1) new_max = 1;
+        if (new_max > MAX_STREAMS) new_max = MAX_STREAMS;
         if (new_max != g_config.max_streams) {
             if (ensure_stream_config_capacity(&g_config, new_max) == 0) {
                 settings_changed = true;

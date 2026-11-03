@@ -4,6 +4,7 @@
 #include "video/onvif_device_management.h"
 #include "video/onvif_soap.h"
 #include "video/stream_manager.h"
+#include "core/config.h"
 #include "core/logger.h"
 #include "database/db_streams.h"
 #include "video/stream_protocol.h"
@@ -740,6 +741,12 @@ int add_onvif_device_as_stream(const onvif_device_info_t *device_info,
     
     config.onvif_discovery_enabled = true;
     
+    // Refuse a camera beyond the supported number (see MAX_STREAMS)
+    if (camera_limit_reached()) {
+        log_error("Camera limit reached (%d): not adding ONVIF device stream %s", MAX_STREAMS, stream_name);
+        return -1;
+    }
+
     // First add the stream to the database
     uint64_t stream_id = add_stream_config(&config);
     if (stream_id == 0) {

@@ -26,6 +26,7 @@
 #include <stdbool.h>
 #include <fcntl.h>
 #include <curl/curl.h>
+#include "utils/poll_wait.h"
 
 // Maximum number of networks to detect
 #define MAX_DETECTED_NETWORKS 10
@@ -165,11 +166,7 @@ static int probe_hosts_for_onvif(uint32_t first_host, uint32_t last_host, bool s
         if (remaining_ms <= 0) {
             break;
         }
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(sock, &fds);
-        struct timeval tv = { .tv_sec = remaining_ms / 1000, .tv_usec = (remaining_ms % 1000) * 1000 };
-        if (select(sock + 1, &fds, NULL, NULL, &tv) <= 0) {
+        if (poll_wait_fd(sock, POLLIN, (int)remaining_ms) <= 0) {
             break;
         }
 

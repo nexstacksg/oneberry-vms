@@ -201,9 +201,17 @@ void close_all_mp4_writers(void) {
     
     // Create a local array to store writers we need to close
     // This prevents double-free issues by ensuring we only close each writer once
-    mp4_writer_t *writers_to_close[MAX_STREAMS] = {0};
-    char stream_names_to_close[MAX_STREAMS][64] = {{0}};
-    char file_paths_to_close[MAX_STREAMS][MAX_PATH_LENGTH] = {{0}};
+    // On the heap: with MAX_STREAMS slots these lists are too big for a thread stack
+    mp4_writer_t **writers_to_close = calloc(MAX_STREAMS, sizeof(*writers_to_close));
+    char (*stream_names_to_close)[64] = calloc(MAX_STREAMS, sizeof(*stream_names_to_close));
+    char (*file_paths_to_close)[MAX_PATH_LENGTH] = calloc(MAX_STREAMS, sizeof(*file_paths_to_close));
+    if (!writers_to_close || !stream_names_to_close || !file_paths_to_close) {
+        log_error("close_all_mp4_writers: out of memory");
+        free(writers_to_close);
+        free(stream_names_to_close);
+        free(file_paths_to_close);
+        return;
+    }
     int num_writers_to_close = 0;
     
     for (int i = 0; i < g_config.max_streams; i++) {
@@ -300,4 +308,7 @@ void close_all_mp4_writers(void) {
     }
     
     log_info("All MP4 recordings finalized (%d writers closed)", num_writers_to_close);
+    free(writers_to_close);
+    free(stream_names_to_close);
+    free(file_paths_to_close);
 }

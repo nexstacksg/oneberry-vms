@@ -554,7 +554,12 @@ void cleanup_mp4_recording_backend(void) {
         int index;
     } cleanup_item_t;
 
-    cleanup_item_t items_to_cleanup[MAX_STREAMS];
+    // On the heap: MAX_STREAMS items are too big for a thread stack
+    cleanup_item_t *items_to_cleanup = calloc(MAX_STREAMS, sizeof(*items_to_cleanup));
+    if (!items_to_cleanup) {
+        log_error("Out of memory collecting MP4 recordings to stop");
+        return;
+    }
     int cleanup_count = 0;
 
     // Collect all active contexts under the mutex, signal them to stop, and
@@ -606,6 +611,8 @@ void cleanup_mp4_recording_backend(void) {
             log_info("Freed MP4 recording context for %s", items_to_cleanup[i].stream_name);
         }
     }
+
+    free(items_to_cleanup);
 
     // Clean up static resources in the MP4 segment recorder
     log_info("Cleaning up MP4 segment recorder resources");

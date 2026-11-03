@@ -24,6 +24,7 @@
 #include <curl/curl.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include "utils/poll_wait.h"
 
 // Default API host
 #define DEFAULT_API_HOST "localhost"
@@ -500,8 +501,6 @@ static size_t discard_response(void *ptr, size_t size, size_t nmemb, void *userd
  */
 static bool is_port_open(const char *host, int port, int timeout_ms) {
     struct addrinfo hints, *res = NULL, *rp;
-    fd_set fdset;
-    struct timeval tv;
     bool result = false;
 
     // Set up hints for getaddrinfo
@@ -544,13 +543,8 @@ static bool is_port_open(const char *host, int port, int timeout_ms) {
         if (connect_res < 0) {
             if (errno == EINPROGRESS) {
                 // Connection in progress, wait for it
-                tv.tv_sec = timeout_ms / 1000;
-                tv.tv_usec = (long)(timeout_ms % 1000) * 1000;
-                FD_ZERO(&fdset);
-                FD_SET(sockfd, &fdset);
-
-                // Wait for connect to complete or timeout
-                int select_res = select(sockfd + 1, NULL, &fdset, NULL, &tv);
+                // Wait for connect to complete or timeout (poll: fd may be >= FD_SETSIZE)
+                int select_res = poll_wait_fd(sockfd, POLLOUT, timeout_ms);
                 if (select_res < 0) {
                     log_warn("is_port_open: select error: %s", strerror(errno));
                     close(sockfd);

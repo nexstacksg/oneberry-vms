@@ -34,35 +34,14 @@ static int states_capacity = 0;  // allocated slot count
 static pthread_mutex_t states_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool initialized = false;
 
+// The state array is allocated once for MAX_STREAMS cameras and never moved,
+// so threads walking it never see it reallocated under them.
 static int ensure_stream_state_capacity_locked(int min_capacity) {
     if (min_capacity <= states_capacity) {
         return 0;
     }
-
-    int old_capacity = states_capacity;
-    int new_capacity = old_capacity > 0 ? old_capacity : 1;
-    while (new_capacity < min_capacity) {
-        if (new_capacity > INT_MAX / 2) {
-            new_capacity = min_capacity;
-            break;
-        }
-        new_capacity *= 2;
-    }
-
-    stream_state_manager_t **expanded = realloc(stream_states,
-                                                (size_t)new_capacity * sizeof(stream_state_manager_t *));
-    if (!expanded) {
-        log_error("Failed to expand stream state capacity from %d to %d",
-                  old_capacity, new_capacity);
-        return -1;
-    }
-
-    stream_states = expanded;
-    memset(stream_states + old_capacity, 0,
-           (size_t)(new_capacity - old_capacity) * sizeof(stream_state_manager_t *));
-    states_capacity = new_capacity;
-    log_info("Stream state capacity expanded to %d slots", states_capacity);
-    return 0;
+    log_error("Camera limit reached: no free stream state slot (%d cameras supported)", states_capacity);
+    return -1;
 }
 
 /**
@@ -73,7 +52,8 @@ int init_stream_state_manager(int max_streams) {
         return 0;  // Already initialized
     }
 
-    if (max_streams < 1) max_streams = 1;
+    (void)max_streams;  // always sized for MAX_STREAMS cameras
+    max_streams = MAX_STREAMS;
 
     pthread_mutex_lock(&states_mutex);
 

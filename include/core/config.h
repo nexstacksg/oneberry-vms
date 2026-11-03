@@ -10,9 +10,11 @@
 #define MAX_STREAM_NAME 256
 // Maximum length for URLs
 #define MAX_URL_LENGTH 512
-// Legacy batch/cache size for older fixed-size helper arrays.
-// Do not use this as a user-facing camera limit; stream config/runtime managers grow dynamically.
-#define MAX_STREAMS 128
+// Maximum number of cameras. Recording, HLS, motion-recording, detection and
+// packet-buffer state live in fixed arrays of this size and are indexed by a
+// stream slot, so the stream config capacity is capped here (see
+// ensure_stream_config_capacity) and adding a camera beyond it is refused.
+#define MAX_STREAMS 1024
 #define WEB_TRUSTED_PROXY_CIDRS_MAX 1024
 
 // Stream protocol enum
@@ -266,9 +268,14 @@ int load_config(config_t *config);
 /**
  * Ensure the stream config array can hold at least @p min_streams entries.
  *
- * This is capacity management only; it is not a camera-count limit.
+ * Capacity never grows beyond MAX_STREAMS; asking for more fails.
  */
 int ensure_stream_config_capacity(config_t *config, int min_streams);
+
+/**
+ * True when MAX_STREAMS cameras are configured, so no more can be added.
+ */
+bool camera_limit_reached(void);
 
 /**
  * Reload configuration from disk

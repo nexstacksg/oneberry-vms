@@ -4,6 +4,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <sys/resource.h>
 #include <stdbool.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -250,6 +251,52 @@ static void init_signals() {
 
     log_info("Signal handlers initialized with improved handling");
 }
+// Recordings started at once by the service check, and the pause between batches
+#define RECORDING_START_BATCH 8
+#define RECORDING_START_BATCH_DELAY_MS 1000
+
+/**
+ * Each recording camera keeps several files and sockets open (camera and
+ * go2rtc connections, the MP4 file, web clients). The usual soft limit of
+ * 1024 open files runs out at a few hundred cameras, after which new
+ * connections, recordings and even the web server fail. Raise it to the
+ * hard limit. (All waits use poll(), so descriptors above 1024 are safe.)
+ */
+static void raise_open_file_limit(void) {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
+        log_warn("Could not read the open-file limit: %s", strerror(errno));
+        return;
+    }
+    if (rl.rlim_cur >= rl.rlim_max) {
+        log_info("Open-file limit: %llu", (unsigned long long)rl.rlim_cur);
+        return;
+    }
+    rlim_t old = rl.rlim_cur;
+    rl.rlim_cur = rl.rlim_max;
+    if (setrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        log_info("Open-file limit raised from %llu to %llu",
+                 (unsigned long long)old, (unsigned long long)rl.rlim_cur);
+    } else {
+        log_warn("Could not raise the open-file limit from %llu: %s",
+                 (unsigned long long)old, strerror(errno));
+    }
+}
+
+/**
+ * True if @p pid is a running process whose name is lightnvr.
+ */
+static bool pid_is_lightnvr(pid_t pid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/comm", (int)pid);
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    char name[64] = {0};
+    bool match = fgets(name, sizeof(name), fp) && strncmp(name, "lightnvr", 8) == 0;
+    fclose(fp);
+    return match;
+}
+
 /**
  * Check if another instance is running and kill it if needed
  */
@@ -277,6 +324,15 @@ static int check_and_kill_existing_instance(const char *pid_file) {
         return 0;
     }
     pid_t existing_pid = (pid_t)pid_val;
+
+    // A PID file left by a crash is stale. After a container restart its PID
+    // often belongs to this very process (or another program), and signalling
+    // it would make the server stop itself on every start.
+    if (existing_pid == getpid() || !pid_is_lightnvr(existing_pid)) {
+        log_info("Removing stale PID file %s (PID %d is not a running LightNVR)", pid_file, existing_pid);
+        unlink(pid_file);
+        return 0;
+    }
 
     // Check if process exists
     if (kill(existing_pid, 0) == 0) {
@@ -536,6 +592,8 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Failed to initialize logger\n");
         return EXIT_FAILURE;
     }
+
+    raise_open_file_limit();
 
     // Define a variable to store the custom config path
     char custom_config_path[MAX_PATH_LENGTH] = {0};
@@ -1760,16 +1818,15 @@ static void check_and_ensure_services(void) {
                 log_info("Recording state for stream %s: %d (1=active, 0=inactive)", current_config->streams[i].name, recording_state);
 
                 if (recording_state == 0) {
-                    // Stagger recording starts: if we've already started one or more
-                    // recordings in this check cycle, wait a few seconds before starting
-                    // the next one.  This gives go2rtc time to establish each RTSP
-                    // connection and avoids overwhelming it (and the cameras) with
-                    // simultaneous connection attempts.
-                    if (recordings_started > 0) {
-                        log_info("Staggering recording start for stream '%s' — waiting 3 seconds "
-                                 "after previous recording start (%d started so far)",
-                                 current_config->streams[i].name, recordings_started);
-                        sleep(3);
+                    // Stagger recording starts in small batches so go2rtc is not
+                    // flooded with simultaneous RTSP sessions. go2rtc is already
+                    // connected to each camera (preload at registration); these are
+                    // local connections. One camera every 3 s took 26 minutes for
+                    // 520 cameras after a restart, with no recording meanwhile.
+                    if (recordings_started > 0 && recordings_started % RECORDING_START_BATCH == 0) {
+                        log_info("Staggering recording starts: %d started, next batch in %d ms",
+                                 recordings_started, RECORDING_START_BATCH_DELAY_MS);
+                        usleep(RECORDING_START_BATCH_DELAY_MS * 1000);
                     }
 
                     // Recording is not active, start it

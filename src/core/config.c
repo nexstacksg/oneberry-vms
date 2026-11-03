@@ -23,6 +23,8 @@ config_t g_config;
 
 #define DEFAULT_MAX_STREAMS 128
 
+static int resize_stream_slots(config_t *config, int new_max);
+
 /**
  * Safe integer conversion from string using strtol.
  * Returns the converted value, or fallback on failure (empty string, non-numeric, overflow).
@@ -269,22 +271,27 @@ static void apply_env_overrides(config_t *config) {
 void load_default_config(config_t *config) {
     if (!config) return;
 
-    // Free any existing dynamic streams array before zeroing the struct
-    if (config->streams) {
-        free(config->streams);
-        config->streams = NULL;
-    }
+    // The camera list is allocated once, for MAX_STREAMS cameras, and never
+    // moved or freed while running: recording, live-view and API threads keep
+    // pointers into it. A reload (e.g. after saving Settings) keeps the list
+    // and the cameras in it; cameras are stored in the database, not the INI.
+    stream_config_t *existing_streams = config->streams;
+    int existing_max_streams = config->max_streams;
 
     // Clear the structure
     memset(config, 0, sizeof(config_t));
 
-    // --- Runtime stream limit ---
-    config->max_streams = DEFAULT_MAX_STREAMS; // overridden by [streams] max_streams in INI
-    config->streams = calloc(config->max_streams, sizeof(stream_config_t));
-    if (!config->streams) {
-        // Fatal: we can't run without a streams array. Caller will detect NULL.
-        log_error("load_default_config: failed to allocate streams array");
-        return;
+    if (existing_streams) {
+        config->streams = existing_streams;
+        config->max_streams = existing_max_streams;
+    } else {
+        config->max_streams = DEFAULT_MAX_STREAMS; // overridden by [streams] max_streams in INI
+        config->streams = calloc(MAX_STREAMS, sizeof(stream_config_t));
+        if (!config->streams) {
+            // Fatal: we can't run without a streams array. Caller will detect NULL.
+            log_error("load_default_config: failed to allocate streams array");
+            return;
+        }
     }
 
     // --- Web thread pool default: 2x online CPUs, clamped [2, 128] ---
@@ -820,21 +827,21 @@ static int config_ini_handler(void* user, const char* section, const char* name,
         if (strcmp(name, "max_streams") == 0) {
             int new_max = safe_atoi(value, 0);
             if (new_max < 1) new_max = 1;
-            if (new_max != config->max_streams) {
-                stream_config_t *p = realloc(config->streams, new_max * sizeof(stream_config_t));
-                if (p) {
-                    // Zero-initialise newly added slots when expanding
-                    if (new_max > config->max_streams) {
-                        memset(p + config->max_streams, 0,
-                               (new_max - config->max_streams) * sizeof(stream_config_t));
+            if (new_max > MAX_STREAMS) {
+                log_warn("max_streams %d is above the camera limit; using %d", new_max, MAX_STREAMS);
+                new_max = MAX_STREAMS;
+            }
+            // Never below the cameras already loaded (a reload keeps them)
+            if (new_max < config->max_streams) {
+                for (int i = config->max_streams - 1; i >= new_max; i--) {
+                    if (config->streams && config->streams[i].name[0] != '\0') {
+                        new_max = i + 1;
+                        break;
                     }
-                    config->streams    = p;
-                    config->max_streams = new_max;
-                    log_info("max_streams set to %d", new_max);
-                } else {
-                    log_error("Failed to realloc streams array for max_streams=%d, keeping %d",
-                              new_max, config->max_streams);
                 }
+            }
+            if (new_max != config->max_streams && resize_stream_slots(config, new_max) == 0) {
+                log_info("max_streams set to %d", new_max);
             }
         }
     }
@@ -1026,6 +1033,11 @@ static int load_config_from_file(const char *filename, config_t *config) {
 int ensure_stream_config_capacity(config_t *config, int min_streams) {
     if (!config || min_streams < 1) return -1;
     if (min_streams <= config->max_streams) return 0;
+    if (min_streams > MAX_STREAMS) {
+        log_error("Camera limit reached: %d cameras requested, this system supports up to %d",
+                  min_streams, MAX_STREAMS);
+        return -1;
+    }
 
     int new_max = config->max_streams > 0 ? config->max_streams : DEFAULT_MAX_STREAMS;
     while (new_max < min_streams) {
@@ -1035,48 +1047,32 @@ int ensure_stream_config_capacity(config_t *config, int min_streams) {
         }
         new_max *= 2;
     }
+    // Per-camera state arrays are MAX_STREAMS long; never index past them
+    if (new_max > MAX_STREAMS) new_max = MAX_STREAMS;
 
-    size_t new_size = (size_t)new_max;
-    if (new_size > SIZE_MAX / sizeof(stream_config_t)) {
-        log_error("ensure_stream_config_capacity: requested stream capacity is too large");
-        return -1;
-    }
-
-    stream_config_t *p = realloc(config->streams, new_size * sizeof(stream_config_t));
-    if (!p) {
-        log_error("Failed to realloc streams array for capacity=%d, keeping %d",
-                  new_max, config->max_streams);
-        return -1;
-    }
-
-    if (new_max > config->max_streams) {
-        memset(p + config->max_streams, 0,
-               (size_t)(new_max - config->max_streams) * sizeof(stream_config_t));
-    }
-
-    config->streams = p;
-    config->max_streams = new_max;
+    // The list already has room for MAX_STREAMS cameras: only the number of
+    // slots in use grows, the memory never moves (other threads point into it)
+    if (resize_stream_slots(config, new_max) != 0) return -1;
     log_info("Stream config capacity expanded to %d", new_max);
     return 0;
 }
 
+bool camera_limit_reached(void) {
+    int count = count_stream_configs();
+    return count >= MAX_STREAMS;
+}
+
+// Set how many camera slots are in use. The list is allocated once for
+// MAX_STREAMS cameras (load_default_config), so nothing is reallocated.
 static int resize_stream_slots(config_t *config, int new_max) {
-    if (!config || new_max < 1) return -1;
+    if (!config || !config->streams || new_max < 1) return -1;
+    if (new_max > MAX_STREAMS) new_max = MAX_STREAMS;
     if (new_max == config->max_streams) return 0;
 
-    stream_config_t *p = realloc(config->streams, (size_t)new_max * sizeof(stream_config_t));
-    if (!p) {
-        log_error("Failed to realloc streams array for max_streams=%d, keeping %d",
-                  new_max, config->max_streams);
-        return -1;
-    }
-
     if (new_max > config->max_streams) {
-        memset(p + config->max_streams, 0,
+        memset(config->streams + config->max_streams, 0,
                (size_t)(new_max - config->max_streams) * sizeof(stream_config_t));
     }
-
-    config->streams = p;
     config->max_streams = new_max;
     return 0;
 }
@@ -1122,6 +1118,13 @@ int load_stream_configs(config_t *config) {
     if (count == 0) {
         log_info("No stream configurations found in database");
         return 0;
+    }
+
+    if (count > MAX_STREAMS) {
+        // Better to run the first MAX_STREAMS cameras than none at all
+        log_error("Database has %d cameras but this system supports up to %d; "
+                  "only the first %d are loaded", count, MAX_STREAMS, MAX_STREAMS);
+        count = MAX_STREAMS;
     }
 
     if (count > config->max_streams) {

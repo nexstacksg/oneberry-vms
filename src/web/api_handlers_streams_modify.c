@@ -902,6 +902,17 @@ void handle_post_stream(const http_request_t *req, http_response_t *res) {
         return;
     }
 
+    // Refuse a camera beyond the supported number (see MAX_STREAMS)
+    if (camera_limit_reached()) {
+        char message[160];
+        snprintf(message, sizeof(message),
+                 "Camera limit reached: this system supports up to %d cameras. "
+                 "Delete a camera before adding another.", MAX_STREAMS);
+        log_error("Refusing to add stream %s: %s", config.name, message);
+        http_response_set_json_error(res, 409, message);
+        return;
+    }
+
     // Add stream to database
     uint64_t stream_id = add_stream_config(&config);
     if (stream_id == 0) {
