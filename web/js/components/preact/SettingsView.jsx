@@ -8,6 +8,7 @@ import { showStatusMessage } from './ToastContainer.jsx';
 import { ContentLoader } from './LoadingIndicator.jsx';
 import { useQuery, useMutation, fetchJSON } from '../../query-client.js';
 import { ThemeCustomizer, hasThemeCustomizationOptions } from './ThemeCustomizer.jsx';
+import { NasStorageSettings } from './NasStorageSettings.jsx';
 import { validateSession } from '../../utils/auth-utils.js';
 import { formatLocalDateTime } from '../../utils/date-utils.js';
 import { useI18n } from '../../i18n.js';
@@ -778,6 +779,8 @@ export function SettingsView() {
             </div>
           </div>
           </div>
+
+          {userRole === 'admin' && <NasStorageSettings canModify={canModifySettings} />}
           
           <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4">
           <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.webInterface')}</h3>

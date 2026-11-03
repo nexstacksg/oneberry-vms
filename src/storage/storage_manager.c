@@ -21,6 +21,7 @@
 #include "core/logger.h"
 #include "core/mqtt_client.h"
 #include "core/path_utils.h"
+#include "storage/nas_storage.h"
 
 // Maximum recordings to delete per stream per run
 #define MAX_RECORDINGS_PER_STREAM 100
@@ -184,9 +185,11 @@ int get_storage_stats(storage_stats_t *stats) {
     // Initialize stats structure
     memset(stats, 0, sizeof(storage_stats_t));
 
-    // Get filesystem statistics for the storage path
+    // Get filesystem statistics for where new recordings go (the NAS when connected)
+    char stats_path[MAX_PATH_LENGTH];
+    nas_recording_root(storage_manager.storage_path, stats_path, sizeof(stats_path));
     struct statvfs fs_stats;
-    if (statvfs(storage_manager.storage_path, &fs_stats) != 0) {
+    if (statvfs(stats_path, &fs_stats) != 0) {
         log_error("Failed to get filesystem statistics: %s", strerror(errno));
         return -1;
     }
@@ -538,10 +541,27 @@ int apply_retention_policy(void) {
         log_error("Storage path %s or mp4 subdirectory is not accessible - "
                   "skipping orphan cleanup to prevent incorrect mass deletion",
                   storage_manager.storage_path);
+    } else if (nas_unavailable()) {
+        // Recordings on the NAS look missing while it is unreachable
+        log_warn("NAS storage is not available - skipping orphan cleanup so NAS recordings are not "
+                 "removed from the list");
     } else {
         int total_checked = 0;
         recording_metadata_t orphaned[MAX_ORPHANED_BATCH];
         int orphan_count = get_orphaned_db_entries(orphaned, MAX_ORPHANED_BATCH, &total_checked);
+
+        // Recordings on a NAS that is disconnected or down are not missing,
+        // only out of reach: keep them (they play again once it is back)
+        int kept = 0;
+        for (int i = 0; i < orphan_count; i++) {
+            if (!nas_path_out_of_reach(orphaned[i].file_path)) orphaned[kept++] = orphaned[i];
+        }
+        if (kept < orphan_count) {
+            log_info("Keeping %d recordings stored on the NAS while it is not connected",
+                     orphan_count - kept);
+            total_checked -= orphan_count - kept;
+            orphan_count = kept;
+        }
 
         if (orphan_count > 0 && total_checked > 0) {
             // Safety threshold: if more than 50% of checked recordings appear orphaned,

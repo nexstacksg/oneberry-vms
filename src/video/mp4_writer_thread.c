@@ -39,6 +39,7 @@
 #include "database/db_streams.h"
 #include "storage/storage_manager_streams_cache.h"
 #include "telemetry/stream_metrics.h"
+#include "storage/nas_storage.h"
 
 // A few hundred ms late is normal with hundreds of cameras; warn only when a
 // rotation is clearly delayed (otherwise the log fills with harmless errors)
@@ -494,6 +495,10 @@ static void *mp4_writer_rtsp_thread(void *arg) {
                                    delay_ms,
                                    "wall_clock_boundary");
 
+                // NAS connected or lost since the last segment: switch folder
+                nas_retarget_recording_dir(thread_ctx->writer->output_dir,
+                                           sizeof(thread_ctx->writer->output_dir));
+
                 // Create new output path
                 char new_path[MAX_PATH_LENGTH];
                 build_segment_output_path(new_path, sizeof(new_path),
@@ -751,6 +756,9 @@ static void *mp4_writer_rtsp_thread(void *arg) {
             // reused on every retry, producing "Output file already exists" warnings
             // for every attempt after the first partial (261-byte) file is written.
             if (thread_ctx->writer && thread_ctx->writer->output_dir[0] != '\0') {
+                // A failing NAS is a likely cause: move to the local disk if it is gone
+                nas_retarget_recording_dir(thread_ctx->writer->output_dir,
+                                           sizeof(thread_ctx->writer->output_dir));
                 time_t retry_ts = time(NULL);
                 struct tm retry_tm_buf;
                 const struct tm *retry_tm = localtime_r(&retry_ts, &retry_tm_buf);

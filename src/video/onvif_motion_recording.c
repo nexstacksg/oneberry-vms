@@ -23,6 +23,7 @@
 #include "database/database_manager.h"
 #include "database/db_recordings.h"
 #include "database/db_streams.h"
+#include "storage/nas_storage.h"
 
 // Forward declaration for recording function defined in recording.c
 extern int stop_mp4_recording(const char *stream_name);
@@ -270,19 +271,23 @@ static int generate_recording_path(const char *stream_name, char *path, size_t p
     strftime(month, sizeof(month), "%m", tm_info);
     strftime(day, sizeof(day), "%d", tm_info);
 
+    // NAS when connected, otherwise the local storage path
+    char root[MAX_PATH_LENGTH];
+    nas_recording_root(config->storage_path, root, sizeof(root));
+
     char dir_path[MAX_PATH_LENGTH];
     snprintf(dir_path, sizeof(dir_path), "%s/%s/%s/%s/%s",
-             config->storage_path, sanitized_name, year, month, day);
+             root, sanitized_name, year, month, day);
 
     // Create directories if they don't exist
     char temp_path[MAX_PATH_LENGTH];
-    snprintf(temp_path, sizeof(temp_path), "%s/%s", config->storage_path, sanitized_name);
+    snprintf(temp_path, sizeof(temp_path), "%s/%s", root, sanitized_name);
     mkdir(temp_path, 0755);
 
-    snprintf(temp_path, sizeof(temp_path), "%s/%s/%s", config->storage_path, sanitized_name, year);
+    snprintf(temp_path, sizeof(temp_path), "%s/%s/%s", root, sanitized_name, year);
     mkdir(temp_path, 0755);
 
-    snprintf(temp_path, sizeof(temp_path), "%s/%s/%s/%s", config->storage_path, sanitized_name, year, month);
+    snprintf(temp_path, sizeof(temp_path), "%s/%s/%s/%s", root, sanitized_name, year, month);
     mkdir(temp_path, 0755);
 
     mkdir(dir_path, 0755);

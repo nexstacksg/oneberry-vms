@@ -71,6 +71,7 @@ void init_recordings_system(void);
 // Include necessary headers for signal handling
 #include <signal.h>
 #include <fcntl.h>
+#include "storage/nas_storage.h"
 
 // Global flag for graceful shutdown
 volatile bool running = true;
@@ -774,6 +775,18 @@ int main(int argc, char *argv[]) {
 
     // Copy configuration to global config
     memcpy(&g_config, &config, sizeof(config_t));
+
+    // Network storage (NAS): connect before recordings start so they go there
+    {
+        char config_dir[MAX_PATH_LENGTH] = "/etc/lightnvr";
+        const char *loaded = get_loaded_config_path();
+        if (loaded && loaded[0]) {
+            snprintf(config_dir, sizeof(config_dir), "%s", loaded);
+            char *slash = strrchr(config_dir, '/');
+            if (slash && slash != config_dir) *slash = '\0';
+        }
+        nas_storage_init(config_dir);
+    }
 
     // Initialize storage manager
     if (init_storage_manager(config.storage_path, config.max_storage_size) != 0) {
@@ -1564,6 +1577,7 @@ cleanup:
 
         log_info("Shutting down storage manager...");
         shutdown_storage_manager();
+        nas_storage_shutdown();
 
         log_info("Shutting down recording sync thread...");
         stop_recording_sync_thread();
@@ -1666,6 +1680,7 @@ cleanup:
         shutdown_stream_state_adapter();
         shutdown_stream_state_manager();
         shutdown_storage_manager();
+        nas_storage_shutdown();
 
         // Ensure all database operations are complete before cleanup
         log_info("Ensuring all database operations are complete...");

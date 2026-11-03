@@ -35,6 +35,7 @@
 #include "video/mp4_writer.h"
 #include "video/mp4_recording.h"
 #include "video/mp4_recording_internal.h"
+#include "storage/nas_storage.h"
 #include "video/mp4_writer_thread.h"
 #include "video/mp4_segment_recorder.h"
 #include "video/stream_packet_processor.h"
@@ -108,13 +109,11 @@ static void build_mp4_output_dir(const char *stream_name,
 
     sanitize_stream_name(stream_name, encoded_name, MAX_STREAM_NAME);
 
-    if (global_config->record_mp4_directly && global_config->mp4_storage_path[0] != '\0') {
-        snprintf(mp4_dir, mp4_dir_size, "%s/%s/%s",
-                 global_config->mp4_storage_path, encoded_name, quality_dir);
-    } else {
-        snprintf(mp4_dir, mp4_dir_size, "%s/mp4/%s/%s",
-                 global_config->storage_path, encoded_name, quality_dir);
-    }
+    (void)global_config;
+    // NAS when connected, otherwise the local MP4 folder
+    char mp4_root[MAX_PATH_LENGTH];
+    nas_mp4_recording_dir(mp4_root, sizeof(mp4_root));
+    snprintf(mp4_dir, mp4_dir_size, "%s/%s/%s", mp4_root, encoded_name, quality_dir);
 }
 
 /**
@@ -732,11 +731,7 @@ int start_mp4_recording(const char *stream_name) {
 
         // Try to create the parent directory first
         char parent_dir[MAX_PATH_LENGTH];
-        if (global_config->record_mp4_directly && global_config->mp4_storage_path[0] != '\0') {
-            strncpy(parent_dir, global_config->mp4_storage_path, MAX_PATH_LENGTH - 1);
-        } else {
-            snprintf(parent_dir, MAX_PATH_LENGTH, "%s/mp4", global_config->storage_path);
-        }
+        nas_mp4_recording_dir(parent_dir, MAX_PATH_LENGTH);
 
         ret = mkdir_recursive(parent_dir);
         if (ret != 0) {
@@ -890,11 +885,7 @@ int start_mp4_recording_with_url(const char *stream_name, const char *url) {
 
         // Try to create the parent directory first
         char parent_dir[MAX_PATH_LENGTH];
-        if (global_config->record_mp4_directly && global_config->mp4_storage_path[0] != '\0') {
-            strncpy(parent_dir, global_config->mp4_storage_path, MAX_PATH_LENGTH - 1);
-        } else {
-            snprintf(parent_dir, MAX_PATH_LENGTH, "%s/mp4", global_config->storage_path);
-        }
+        nas_mp4_recording_dir(parent_dir, MAX_PATH_LENGTH);
 
         ret = mkdir_recursive(parent_dir);
         if (ret != 0) {
