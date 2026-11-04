@@ -660,6 +660,25 @@ static const char migration_0043_up[] =
 static const char migration_0043_down[] =
     "SELECT 1;";
 
+static const char migration_0044_up[] =
+    "CREATE TABLE IF NOT EXISTS cloud_uploads (\n"
+    "    recording_id INTEGER PRIMARY KEY,\n"
+    "    status INTEGER NOT NULL DEFAULT 0,\n"
+    "    attempts INTEGER NOT NULL DEFAULT 0,\n"
+    "    next_attempt INTEGER NOT NULL DEFAULT 0,\n"
+    "    remote_path TEXT,\n"
+    "    bytes INTEGER NOT NULL DEFAULT 0,\n"
+    "    uploaded_at INTEGER,\n"
+    "    last_error TEXT\n"
+    ");\n"
+    "CREATE INDEX IF NOT EXISTS idx_cloud_uploads_status ON cloud_uploads(status, next_attempt);\n"
+    "CREATE INDEX IF NOT EXISTS idx_cloud_uploads_uploaded_at ON cloud_uploads(uploaded_at);";
+
+static const char migration_0044_down[] =
+    "DROP INDEX IF EXISTS idx_cloud_uploads_uploaded_at;\n"
+    "DROP INDEX IF EXISTS idx_cloud_uploads_status;\n"
+    "DROP TABLE IF EXISTS cloud_uploads;";
+
 static const migration_t embedded_migrations_data[] = {
     {
         .version = "0001",
@@ -962,8 +981,15 @@ static const migration_t embedded_migrations_data[] = {
         .sql_down = migration_0043_down,
         .is_embedded = true
     },
+    {
+        .version = "0044",
+        .description = "add_cloud_uploads",
+        .sql_up = migration_0044_up,
+        .sql_down = migration_0044_down,
+        .is_embedded = true
+    },
 };
 
-#define EMBEDDED_MIGRATIONS_COUNT 43
+#define EMBEDDED_MIGRATIONS_COUNT 44
 
 #endif /* DB_EMBEDDED_MIGRATIONS_H */

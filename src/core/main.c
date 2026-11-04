@@ -72,6 +72,7 @@ void init_recordings_system(void);
 #include <signal.h>
 #include <fcntl.h>
 #include "storage/nas_storage.h"
+#include "storage/cloud_storage.h"
 
 // Global flag for graceful shutdown
 volatile bool running = true;
@@ -786,6 +787,8 @@ int main(int argc, char *argv[]) {
             if (slash && slash != config_dir) *slash = '\0';
         }
         nas_storage_init(config_dir);
+        // Cloud uploads (needs the database, which is open by now)
+        cloud_storage_init(config_dir);
     }
 
     // Initialize storage manager
@@ -1578,6 +1581,7 @@ cleanup:
         log_info("Shutting down storage manager...");
         shutdown_storage_manager();
         nas_storage_shutdown();
+        cloud_storage_shutdown();
 
         log_info("Shutting down recording sync thread...");
         stop_recording_sync_thread();
@@ -1681,6 +1685,7 @@ cleanup:
         shutdown_stream_state_manager();
         shutdown_storage_manager();
         nas_storage_shutdown();
+        cloud_storage_shutdown();
 
         // Ensure all database operations are complete before cleanup
         log_info("Ensuring all database operations are complete...");
