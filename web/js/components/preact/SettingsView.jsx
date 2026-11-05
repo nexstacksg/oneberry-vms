@@ -20,6 +20,15 @@ const MAX_STREAMS_DEFAULT = 128;
  * SettingsView component
  * @returns {JSX.Element} SettingsView component
  */
+const SETTINGS_TABS = [
+  { id: 'general', label: 'settings.tab.general' },
+  { id: 'storage', label: 'settings.tab.storage' },
+  { id: 'web', label: 'settings.tab.webSecurity' },
+  { id: 'recording', label: 'settings.tab.recordingDetection' },
+  { id: 'streaming', label: 'settings.tab.streaming' },
+  { id: 'mqtt', label: 'settings.tab.mqtt' },
+];
+
 export function SettingsView() {
   const { t } = useI18n();
   const showThemeCustomization = hasThemeCustomizationOptions();
@@ -449,6 +458,28 @@ export function SettingsView() {
     }));
   };
 
+  // Settings tabs: the open tab is kept in the address (settings.html#storage)
+  const [activeSettingsTab, setActiveSettingsTab] = useState(() => {
+    const hash = typeof window !== 'undefined' ? window.location.hash.replace('#', '') : '';
+    return SETTINGS_TABS.some((tab) => tab.id === hash) ? hash : SETTINGS_TABS[0].id;
+  });
+  const selectSettingsTab = (tabId) => {
+    setActiveSettingsTab(tabId);
+    try {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#${tabId}`);
+    } catch {}
+  };
+  const settingsTabStyle = (tabId) => (activeSettingsTab === tabId ? undefined : { display: 'none' });
+  // Follow the address too (links to settings.html#storage, back/forward)
+  useEffect(() => {
+    const onHashChange = () => {
+      const hash = window.location.hash.replace('#', '');
+      if (SETTINGS_TABS.some((tab) => tab.id === hash)) setActiveSettingsTab(hash);
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
   // For viewers, show only appearance settings
   if (isViewer) {
     return (
@@ -526,8 +557,25 @@ export function SettingsView() {
             </div>
           )}
 
+          {/* One tab per area; all tabs are one form, saved together */}
+          <div class="settings-tabs" role="tablist" aria-label={t('settings.title')} data-testid="settings-tabs">
+            {SETTINGS_TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                id={`settings-tab-${tab.id}`}
+                aria-selected={activeSettingsTab === tab.id}
+                class={`settings-tab ${activeSettingsTab === tab.id ? 'is-active' : ''}`}
+                onClick={() => selectSettingsTab(tab.id)}
+              >
+                {t(tab.label)}
+              </button>
+            ))}
+          </div>
+
           {showThemeCustomization && (
-            <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4">
+            <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4" data-settings-tab="general" style={settingsTabStyle('general')}>
               <button
                 onClick={toggleAppearance}
                 class="w-full flex items-center justify-between pb-2 border-b border-border mb-4 group"
@@ -547,7 +595,7 @@ export function SettingsView() {
             </div>
           )}
 
-          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4">
+          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4" data-settings-tab="general" style={settingsTabStyle('general')}>
             <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.general')}</h3>
             <div class="setting grid grid-cols-1 md:grid-cols-3 gap-4 items-center mb-4">
               <label for="setting-log-level" class="font-medium">{t('settings.logLevel')}</label>
@@ -627,7 +675,7 @@ export function SettingsView() {
             </>
           )}
           </div>
-          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4">
+          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4" data-settings-tab="storage" style={settingsTabStyle('storage')}>
           <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.storage')}</h3>
           <div class="setting grid grid-cols-1 md:grid-cols-3 gap-4 items-center mb-4">
             <label for="setting-storage-path" class="font-medium">{t('settings.storagePath')}</label>
@@ -781,10 +829,14 @@ export function SettingsView() {
           </div>
           </div>
 
-          {userRole === 'admin' && <NasStorageSettings canModify={canModifySettings} />}
-          {userRole === 'admin' && <CloudStorageSettings canModify={canModifySettings} />}
+          {userRole === 'admin' && (
+            <div data-settings-tab="storage" style={settingsTabStyle('storage')} class="space-y-6">
+              <NasStorageSettings canModify={canModifySettings} />
+              <CloudStorageSettings canModify={canModifySettings} />
+            </div>
+          )}
           
-          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4">
+          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4" data-settings-tab="web" style={settingsTabStyle('web')}>
           <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.webInterface')}</h3>
           <div class="setting grid grid-cols-1 md:grid-cols-3 gap-4 items-center mb-4">
             <label for="setting-live-layout-max-items" class="font-medium">Cameras per layout</label>
@@ -1008,7 +1060,7 @@ export function SettingsView() {
           </div>
           </div>
 
-          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4">
+          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4" data-settings-tab="web" style={settingsTabStyle('web')}>
           <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.sessionAndDeviceManagement')}</h3>
           <div class="mb-6">
             <h4 class="font-medium mb-2">{t('settings.activeSessions')}</h4>
@@ -1074,7 +1126,7 @@ export function SettingsView() {
           </div>
           </div>
 
-          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4">
+          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4" data-settings-tab="web" style={settingsTabStyle('web')}>
           <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.loginSecurity')}</h3>
           <div class="setting grid grid-cols-1 md:grid-cols-3 gap-4 items-center mb-4">
             <label for="setting-force-mfa" class="font-medium">{t('settings.forceMfaOnLogin')}</label>
@@ -1142,7 +1194,7 @@ export function SettingsView() {
           </div>
           </div>
 
-          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4">
+          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4" data-settings-tab="recording" style={settingsTabStyle('recording')}>
           <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.memoryOptimization')}</h3>
           <div class="setting grid grid-cols-1 md:grid-cols-3 gap-4 items-center mb-4">
             <label for="setting-buffer-size" class="font-medium">{t('settings.bufferSizeKb')}</label>
@@ -1187,7 +1239,7 @@ export function SettingsView() {
           </div>
           </div>
 
-          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4">
+          <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4" data-settings-tab="recording" style={settingsTabStyle('recording')}>
           <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.detectionBasedRecording')}</h3>
           <div class="setting mb-4">
             <p class="setting-description mb-2 text-gray-700 dark:text-gray-300">
@@ -1330,7 +1382,7 @@ export function SettingsView() {
           </div>
 
           {/* go2rtc Settings */}
-          <div class="settings-group bg-card rounded-lg shadow p-6 mb-6">
+          <div class="settings-group bg-card rounded-lg shadow p-6 mb-6" data-settings-tab="streaming" style={settingsTabStyle('streaming')}>
             <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.go2rtcIntegration')}</h3>
             <p class="text-sm text-muted-foreground mb-4">
               {t('settings.go2rtcIntegrationDescription')}
@@ -1533,7 +1585,7 @@ export function SettingsView() {
           </div>
 
           {/* MQTT Settings */}
-          <div class="settings-group bg-card rounded-lg shadow p-6 mb-6">
+          <div class="settings-group bg-card rounded-lg shadow p-6 mb-6" data-settings-tab="mqtt" style={settingsTabStyle('mqtt')}>
             <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.mqttEventStreaming')}</h3>
             <p class="text-sm text-muted-foreground mb-4">
               {t('settings.mqttEventStreamingDescription')}
@@ -1774,7 +1826,7 @@ export function SettingsView() {
           </div>
 
           {/* TURN Server Settings */}
-          <div class="settings-group bg-card rounded-lg shadow p-6 mb-6">
+          <div class="settings-group bg-card rounded-lg shadow p-6 mb-6" data-settings-tab="streaming" style={settingsTabStyle('streaming')}>
             <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.webrtcTurnServer')}</h3>
             <p class="text-sm text-muted-foreground mb-4">
               {t('settings.webrtcTurnServerDescription')}
@@ -1845,7 +1897,7 @@ export function SettingsView() {
           </div>
 
           {/* ONVIF Discovery Settings */}
-          <div class="settings-group bg-card rounded-lg shadow p-6 mb-6">
+          <div class="settings-group bg-card rounded-lg shadow p-6 mb-6" data-settings-tab="streaming" style={settingsTabStyle('streaming')}>
             <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">{t('settings.onvifDiscovery')}</h3>
             <p class="text-sm text-muted-foreground mb-4">
               {t('settings.onvifDiscoveryDescription')}
@@ -1905,7 +1957,7 @@ export function SettingsView() {
 
           {/* Save Settings Button - at bottom of form */}
           {canModifySettings && (
-            <div class="flex justify-end mt-6">
+            <div class="settings-save-bar flex justify-end mt-6">
               <button
                 id="save-settings-btn"
                 class="px-6 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"

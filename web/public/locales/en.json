@@ -1288,5 +1288,11 @@
   "settings.discoveryIntervalSecondsRangeHelp": "How often to scan for cameras (30–3600 seconds)",
   "settings.discoveryNetwork": "Discovery Network",
   "settings.discoveryNetworkExamples": "Examples: 192.168.1.0/24, 10.0.0.0/16, auto",
-  "settings.saveSettings": "Save Settings"
+  "settings.saveSettings": "Save Settings",
+  "settings.tab.general": "General",
+  "settings.tab.storage": "Storage",
+  "settings.tab.webSecurity": "Web & Security",
+  "settings.tab.recordingDetection": "Recording & Detection",
+  "settings.tab.streaming": "Streaming",
+  "settings.tab.mqtt": "MQTT"
 }
