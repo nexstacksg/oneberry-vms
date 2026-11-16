@@ -579,8 +579,30 @@ static void safe_component(const char *in, char *out, size_t len) {
     out[j] = '\0';
 }
 
-static void upload_one(const cloud_config_t *cfg, const upload_item_t *item) {
+/* Where the recording is now (it may have moved to the NAS backup since it was queued). */
+static void current_path(long long id, char *path, size_t len) {
+    sqlite3 *db = get_db_handle();
+    if (!db) return;
+    pthread_mutex_lock(get_db_mutex());
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT file_path FROM recordings WHERE id = ?1;", -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, id);
+        if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_text(stmt, 0)) {
+            copy_str(path, len, (const char *)sqlite3_column_text(stmt, 0));
+        }
+        sqlite3_finalize(stmt);
+    }
+    pthread_mutex_unlock(get_db_mutex());
+}
+
+static void upload_one(const cloud_config_t *cfg, const upload_item_t *queued) {
+    upload_item_t moved = *queued;
+    const upload_item_t *item = queued;
     struct stat st;
+    if (stat(item->file_path, &st) != 0) {
+        current_path(queued->id, moved.file_path, sizeof(moved.file_path));
+        item = &moved;
+    }
     if (stat(item->file_path, &st) != 0) {
         finish_item(item->id, UPLOAD_SKIPPED, NULL, 0, "Recording file no longer exists");
         return;

@@ -22,6 +22,7 @@
 #include "core/mqtt_client.h"
 #include "core/path_utils.h"
 #include "storage/nas_storage.h"
+#include "storage/nas_backup.h"
 
 // Maximum recordings to delete per stream per run
 #define MAX_RECORDINGS_PER_STREAM 100
@@ -62,6 +63,9 @@ static struct {
     .reserved_space = 0
 };
 
+/* Recordings whose local file was removed but which stay on the NAS backup */
+static int kept_on_backup = 0;
+
 static bool delete_recording_file_and_metadata(const recording_metadata_t *recording,
                                                const char *context,
                                                uint64_t *freed_bytes) {
@@ -73,6 +77,21 @@ static bool delete_recording_file_and_metadata(const recording_metadata_t *recor
 
     if (!recording) {
         return false;
+    }
+
+    /* Backed up to the NAS: only the local file goes; the recording stays and
+       plays from the backup copy (main and backup retention are separate) */
+    if (nas_backup_take_over(recording->id, recording->file_path)) {
+        if (unlink(recording->file_path) != 0 && errno != ENOENT) {
+            log_warn("%s: recording %llu moved to its NAS backup, but the local file could not be deleted: %s",
+                     context, (unsigned long long)recording->id, strerror(errno));
+        }
+        update_stream_storage_cache_remove_recording(recording->stream_name, recording->size_bytes);
+        if (freed_bytes) {
+            *freed_bytes = recording->size_bytes;
+        }
+        __atomic_add_fetch(&kept_on_backup, 1, __ATOMIC_RELAXED);
+        return true;
     }
 
     if (recording->file_path[0] != '\0') {
@@ -596,8 +615,9 @@ int apply_retention_policy(void) {
         }
     }
 
-    log_info("Retention policy complete: deleted %d recordings, freed %lu bytes",
-             total_deleted, (unsigned long)total_freed);
+    int kept = __atomic_exchange_n(&kept_on_backup, 0, __ATOMIC_RELAXED);
+    log_info("Retention policy complete: deleted %d recordings (%d of them only locally, kept on the NAS backup), "
+             "freed %lu bytes", total_deleted, kept, (unsigned long)total_freed);
 
     free(stream_names);
     return total_deleted;

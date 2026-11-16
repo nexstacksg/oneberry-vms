@@ -679,6 +679,25 @@ static const char migration_0044_down[] =
     "DROP INDEX IF EXISTS idx_cloud_uploads_status;\n"
     "DROP TABLE IF EXISTS cloud_uploads;";
 
+static const char migration_0045_up[] =
+    "CREATE TABLE IF NOT EXISTS nas_backups (\n"
+    "    recording_id INTEGER PRIMARY KEY,\n"
+    "    status INTEGER NOT NULL DEFAULT 0,\n"
+    "    attempts INTEGER NOT NULL DEFAULT 0,\n"
+    "    next_attempt INTEGER NOT NULL DEFAULT 0,\n"
+    "    backup_path TEXT,\n"
+    "    bytes INTEGER NOT NULL DEFAULT 0,\n"
+    "    backed_up_at INTEGER,\n"
+    "    last_error TEXT\n"
+    ");\n"
+    "CREATE INDEX IF NOT EXISTS idx_nas_backups_status ON nas_backups(status, next_attempt);\n"
+    "CREATE INDEX IF NOT EXISTS idx_nas_backups_backed_up_at ON nas_backups(backed_up_at);";
+
+static const char migration_0045_down[] =
+    "DROP INDEX IF EXISTS idx_nas_backups_backed_up_at;\n"
+    "DROP INDEX IF EXISTS idx_nas_backups_status;\n"
+    "DROP TABLE IF EXISTS nas_backups;";
+
 static const migration_t embedded_migrations_data[] = {
     {
         .version = "0001",
@@ -988,8 +1007,15 @@ static const migration_t embedded_migrations_data[] = {
         .sql_down = migration_0044_down,
         .is_embedded = true
     },
+    {
+        .version = "0045",
+        .description = "add_nas_backups",
+        .sql_up = migration_0045_up,
+        .sql_down = migration_0045_down,
+        .is_embedded = true
+    },
 };
 
-#define EMBEDDED_MIGRATIONS_COUNT 44
+#define EMBEDDED_MIGRATIONS_COUNT 45
 
 #endif /* DB_EMBEDDED_MIGRATIONS_H */

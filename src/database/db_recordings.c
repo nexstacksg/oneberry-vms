@@ -12,6 +12,7 @@
 #include <stdbool.h>
 
 #include "database/db_recordings.h"
+#include "storage/nas_storage.h"
 #include "database/db_core.h"
 #include "core/logger.h"
 
@@ -1550,6 +1551,7 @@ int get_recordings_for_retention(const char *stream_name,
         "FROM recordings "
         "WHERE (?1 IS NULL OR stream_name = ?) "
         "AND protected = 0 "
+        "AND file_path NOT GLOB '" NAS_BACKUP_DIR "/*' "
         "AND ("
         "  ((trigger_type IS NULL OR trigger_type != 'detection') AND ? > 0 AND start_time < ?) "
         "  OR "
@@ -1689,6 +1691,7 @@ int get_recordings_for_missing_streams(recording_metadata_t *recordings,
         "r.retention_tier, r.disk_pressure_eligible "
         "FROM recordings r "
         "WHERE r.protected = 0 "
+        "AND r.file_path NOT GLOB '" NAS_BACKUP_DIR "/*' "
         "AND (r.is_complete = 1 OR (? > 0 AND r.start_time < ?)) "
         "AND NOT EXISTS (SELECT 1 FROM streams s WHERE s.name = r.stream_name) "
         "ORDER BY r.start_time ASC "
@@ -1818,6 +1821,7 @@ int get_recordings_for_quota_enforcement(const char *stream_name,
         "WHERE (?1 IS NULL OR stream_name = ?) "
         "AND protected = 0 "
         "AND is_complete = 1 "
+        "AND file_path NOT GLOB '" NAS_BACKUP_DIR "/*' "
         "ORDER BY retention_tier DESC, "
         "CASE WHEN retention_override_days IS NULL OR retention_override_days < 0 THEN 0 ELSE 1 END ASC, "
         "CASE WHEN trigger_type = 'detection' THEN 1 ELSE 0 END ASC, "
@@ -1944,6 +1948,7 @@ int get_recordings_for_global_quota(recording_metadata_t *recordings,
         "FROM recordings "
         "WHERE protected = 0 "
         "AND is_complete = 1 "
+        "AND file_path NOT GLOB '" NAS_BACKUP_DIR "/*' "
         "ORDER BY start_time ASC "
         "LIMIT ?;";
 
@@ -2085,8 +2090,15 @@ int get_orphaned_db_entries(recording_metadata_t *recordings, int max_count,
     // Keep iterating all rows even after max_count orphans are found so that
     // 'checked' reflects the true total — the caller needs this for ratio checks.
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        checked++;
         const char *path = (const char *)sqlite3_column_text(stmt, 2);
+
+        // Files on the NAS are not checked (nor counted): one network round
+        // trip per recording, with the database locked, would stall everything
+        // for minutes on a large archive (NAS backups have their own retention)
+        if (path && strncmp(path, NAS_MOUNT_POINT "/", strlen(NAS_MOUNT_POINT "/")) == 0) {
+            continue;
+        }
+        checked++;
 
         // Check if file exists
         if (path && count < max_count && access(path, F_OK) != 0) {
@@ -2197,6 +2209,7 @@ int get_recordings_for_tiered_retention(const char *stream_name,
               "WHERE stream_name = ? "
               "AND protected = 0 "
               "AND is_complete = 1 "
+              "AND file_path NOT GLOB '" NAS_BACKUP_DIR "/*' "
               "AND ("
               "  (retention_tier = 0 AND start_time < ?) OR "
               "  (retention_tier = 1 AND start_time < ?) OR "
@@ -2214,6 +2227,7 @@ int get_recordings_for_tiered_retention(const char *stream_name,
               "FROM recordings "
               "WHERE protected = 0 "
               "AND is_complete = 1 "
+              "AND file_path NOT GLOB '" NAS_BACKUP_DIR "/*' "
               "AND ("
               "  (retention_tier = 0 AND start_time < ?) OR "
               "  (retention_tier = 1 AND start_time < ?) OR "
@@ -2336,6 +2350,7 @@ int get_recordings_for_pressure_cleanup(recording_metadata_t *recordings,
         "WHERE protected = 0 "
         "AND disk_pressure_eligible = 1 "
         "AND is_complete = 1 "
+        "AND file_path NOT GLOB '" NAS_BACKUP_DIR "/*' "
         "ORDER BY retention_tier DESC, "
         "CASE WHEN retention_override_days IS NULL OR retention_override_days < 0 THEN 0 ELSE 1 END ASC, "
         "CASE WHEN trigger_type = 'detection' THEN 1 ELSE 0 END ASC, "
@@ -2428,9 +2443,11 @@ int64_t get_stream_storage_bytes(const char *stream_name) {
 
     const char *sql;
     if (stream_name) {
-        sql = "SELECT COALESCE(SUM(size_bytes), 0) FROM recordings WHERE stream_name = ? AND is_complete = 1;";
+        sql = "SELECT COALESCE(SUM(size_bytes), 0) FROM recordings WHERE stream_name = ? AND is_complete = 1 "
+              "AND file_path NOT GLOB '" NAS_BACKUP_DIR "/*';";
     } else {
-        sql = "SELECT COALESCE(SUM(size_bytes), 0) FROM recordings WHERE is_complete = 1;";
+        sql = "SELECT COALESCE(SUM(size_bytes), 0) FROM recordings WHERE is_complete = 1 "
+              "AND file_path NOT GLOB '" NAS_BACKUP_DIR "/*';";
     }
 
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);

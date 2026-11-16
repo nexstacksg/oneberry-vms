@@ -107,17 +107,21 @@ void test_get_total_stream_count(void) {
     shutdown_stream_manager();
 }
 
-/* stream manager exposes runtime capacity and expands it on demand */
-void test_stream_capacity_expands_on_demand(void) {
+/* capacity is allocated once for all cameras (never reallocated, so stream
+   pointers held by other threads stay valid) and holds more than asked for */
+void test_stream_capacity_preallocated(void) {
     init_stream_manager(1);
-    TEST_ASSERT_EQUAL_INT(1, get_stream_capacity());
+    int capacity = get_stream_capacity();
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(2, capacity);
 
     stream_config_t first = make_config("cam_first");
     stream_config_t second = make_config("cam_second");
 
-    TEST_ASSERT_NOT_NULL(add_stream(&first));
+    stream_handle_t h1 = add_stream(&first);
+    TEST_ASSERT_NOT_NULL(h1);
     TEST_ASSERT_NOT_NULL(add_stream(&second));
-    TEST_ASSERT_GREATER_OR_EQUAL_INT(2, get_stream_capacity());
+    TEST_ASSERT_EQUAL_INT(capacity, get_stream_capacity());
+    TEST_ASSERT_EQUAL_PTR(h1, get_stream_by_name("cam_first"));
     TEST_ASSERT_EQUAL_INT(2, get_total_stream_count());
 
     shutdown_stream_manager();
@@ -202,7 +206,7 @@ int main(void) {
     RUN_TEST(test_get_stream_by_name_not_found);
     RUN_TEST(test_get_stream_by_index);
     RUN_TEST(test_get_total_stream_count);
-    RUN_TEST(test_stream_capacity_expands_on_demand);
+    RUN_TEST(test_stream_capacity_preallocated);
     RUN_TEST(test_remove_stream_decreases_count);
     RUN_TEST(test_get_stream_config);
     RUN_TEST(test_set_stream_priority);

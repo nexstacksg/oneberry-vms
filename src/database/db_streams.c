@@ -10,6 +10,7 @@
 #include <stdbool.h>
 
 #include "database/db_streams.h"
+#include "storage/nas_storage.h"
 #include "database/db_core.h"
 #include "database/db_schema.h"
 #include "database/db_schema_cache.h"
@@ -1623,7 +1624,8 @@ uint64_t get_stream_storage_usage_db(const char *stream_name) {
     pthread_mutex_lock(db_mutex);
 
     const char *sql = "SELECT COALESCE(SUM(size_bytes), 0) FROM recordings "
-                      "WHERE stream_name = ? AND is_complete = 1;";
+                      "WHERE stream_name = ? AND is_complete = 1 "
+                      "AND file_path NOT GLOB '" NAS_BACKUP_DIR "/*';";
 
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {

@@ -37,6 +37,10 @@
 #define NAS_MONITOR_INTERVAL_SEC 15
 /* A check that takes longer means the NAS is gone (writes would hang) */
 #define NAS_PROBE_TIMEOUT_SEC 8
+/* Failed checks in a row before a connected NAS counts as not reachable, so
+   one slow answer on a busy network does not switch recordings back and forth */
+#define NAS_FAILS_BEFORE_UNAVAILABLE 2
+#define NAS_DEFAULT_RESERVE_GB 50
 
 static pthread_mutex_t nas_mutex = PTHREAD_MUTEX_INITIALIZER;
 static nas_config_t nas_cfg;
@@ -46,6 +50,9 @@ static pthread_t monitor_thread;
 static bool monitor_running = false;
 static pthread_mutex_t monitor_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t monitor_cond = PTHREAD_COND_INITIALIZER;
+static int failed_checks = 0;
+
+void nas_backup_wake(void);
 
 const char *nas_state_name(nas_state_t state) {
     switch (state) {
@@ -90,6 +97,49 @@ static bool valid_version(const char *type, const char *v) {
     return false;
 }
 
+static bool is_backup_role(const nas_config_t *cfg) {
+    return strcmp(cfg->role, "backup") == 0;
+}
+
+/* Role and backup options: fill defaults, keep values in range. */
+static int validate_options(nas_config_t *cfg, char *err, size_t err_len) {
+    if (cfg->role[0] == '\0') copy_str(cfg->role, sizeof(cfg->role), "main");
+    if (strcmp(cfg->role, "main") != 0 && strcmp(cfg->role, "backup") != 0) {
+        snprintf(err, err_len, "Choose how the NAS is used: recording or backup");
+        return -1;
+    }
+    if (strcmp(cfg->backup_when, "schedule") != 0) copy_str(cfg->backup_when, sizeof(cfg->backup_when), "realtime");
+    if (cfg->schedule_start_hour < 0 || cfg->schedule_start_hour > 23 ||
+        cfg->schedule_end_hour < 0 || cfg->schedule_end_hour > 23) {
+        snprintf(err, err_len, "Backup schedule hours must be between 0 and 23");
+        return -1;
+    }
+    if (strcmp(cfg->backup_when, "schedule") == 0 && cfg->schedule_start_hour == cfg->schedule_end_hour) {
+        snprintf(err, err_len, "The backup schedule must start and end at different hours");
+        return -1;
+    }
+    if (cfg->bwlimit_mbps < 0) cfg->bwlimit_mbps = 0;
+    if (cfg->bwlimit_mbps > 10000) cfg->bwlimit_mbps = 10000;
+    if (cfg->reserve_gb <= 0) cfg->reserve_gb = NAS_DEFAULT_RESERVE_GB;
+    if (cfg->keep_days < 0) cfg->keep_days = 0;
+    /* camera list: one name per line, no empty lines */
+    char *w = cfg->cameras;
+    bool line_start = true;
+    for (const char *r = cfg->cameras; *r; r++) {
+        if (*r == '\r') continue;
+        if (*r == '\n') {
+            if (!line_start) *w++ = '\n';
+            line_start = true;
+            continue;
+        }
+        *w++ = *r;
+        line_start = false;
+    }
+    while (w > cfg->cameras && w[-1] == '\n') w--;
+    *w = '\0';
+    return 0;
+}
+
 static int validate_nas_config(nas_config_t *cfg, char *err, size_t err_len) {
     if (strcmp(cfg->type, "nfs") != 0 && strcmp(cfg->type, "smb") != 0) {
         snprintf(err, err_len, "Type must be NFS or SMB");
@@ -128,17 +178,23 @@ static int validate_nas_config(nas_config_t *cfg, char *err, size_t err_len) {
         snprintf(err, err_len, "Unsupported %s version %s", strcmp(cfg->type, "nfs") == 0 ? "NFS" : "SMB", cfg->version);
         return -1;
     }
-    return 0;
+    return validate_options(cfg, err, err_len);
 }
 
 static void load_config_file(void) {
     FILE *fp = fopen(nas_config_path, "r");
     if (!fp) return;
-    char buf[4096];
-    size_t len = fread(buf, 1, sizeof(buf) - 1, fp);
+    size_t cap = 256 * 1024;
+    char *buf = malloc(cap);
+    if (!buf) {
+        fclose(fp);
+        return;
+    }
+    size_t len = fread(buf, 1, cap - 1, fp);
     fclose(fp);
     buf[len] = '\0';
     cJSON *doc = cJSON_Parse(buf);
+    free(buf);
     if (!doc) {
         log_warn("NAS settings file %s is not valid JSON; ignoring it", nas_config_path);
         return;
@@ -151,6 +207,34 @@ static void load_config_file(void) {
     if ((v = cJSON_GetObjectItem(doc, "username")) && cJSON_IsString(v)) copy_str(nas_cfg.username, sizeof(nas_cfg.username), v->valuestring);
     if ((v = cJSON_GetObjectItem(doc, "password")) && cJSON_IsString(v)) copy_str(nas_cfg.password, sizeof(nas_cfg.password), v->valuestring);
     if ((v = cJSON_GetObjectItem(doc, "version")) && cJSON_IsString(v)) copy_str(nas_cfg.version, sizeof(nas_cfg.version), v->valuestring);
+    if ((v = cJSON_GetObjectItem(doc, "role")) && cJSON_IsString(v)) copy_str(nas_cfg.role, sizeof(nas_cfg.role), v->valuestring);
+    const cJSON *b = cJSON_GetObjectItem(doc, "backup");
+    if (cJSON_IsObject(b)) {
+        if ((v = cJSON_GetObjectItem(b, "when")) && cJSON_IsString(v)) copy_str(nas_cfg.backup_when, sizeof(nas_cfg.backup_when), v->valuestring);
+#define NUM(key, field) if ((v = cJSON_GetObjectItem(b, key)) && cJSON_IsNumber(v)) nas_cfg.field = v->valueint
+        NUM("schedule_start_hour", schedule_start_hour);
+        NUM("schedule_end_hour", schedule_end_hour);
+        NUM("bwlimit_mbps", bwlimit_mbps);
+        NUM("reserve_gb", reserve_gb);
+        NUM("keep_days", keep_days);
+#undef NUM
+        if ((v = cJSON_GetObjectItem(b, "since")) && cJSON_IsNumber(v)) nas_cfg.backup_since = (time_t)v->valuedouble;
+        nas_cfg.events_only = cJSON_IsTrue(cJSON_GetObjectItem(b, "events_only"));
+        nas_cfg.include_existing = cJSON_IsTrue(cJSON_GetObjectItem(b, "include_existing"));
+        nas_cfg.delete_local = cJSON_IsTrue(cJSON_GetObjectItem(b, "delete_local"));
+        const cJSON *cams = cJSON_GetObjectItem(b, "cameras");
+        size_t used = 0;
+        const cJSON *cam;
+        cJSON_ArrayForEach(cam, cams) {
+            if (!cJSON_IsString(cam) || !cam->valuestring[0]) continue;
+            int n = snprintf(nas_cfg.cameras + used, sizeof(nas_cfg.cameras) - used, "%s%s",
+                             used ? "\n" : "", cam->valuestring);
+            if (n < 0 || used + (size_t)n >= sizeof(nas_cfg.cameras)) break;
+            used += (size_t)n;
+        }
+    }
+    char ignored[64];
+    if (validate_options(&nas_cfg, ignored, sizeof(ignored)) != 0) copy_str(nas_cfg.role, sizeof(nas_cfg.role), "main");
     cJSON_Delete(doc);
 }
 
@@ -164,6 +248,28 @@ static int save_config_file(const nas_config_t *cfg) {
     cJSON_AddStringToObject(doc, "username", cfg->username);
     cJSON_AddStringToObject(doc, "password", cfg->password);
     cJSON_AddStringToObject(doc, "version", cfg->version);
+    cJSON_AddStringToObject(doc, "role", cfg->role[0] ? cfg->role : "main");
+    cJSON *b = cJSON_AddObjectToObject(doc, "backup");
+    cJSON_AddStringToObject(b, "when", cfg->backup_when[0] ? cfg->backup_when : "realtime");
+    cJSON_AddNumberToObject(b, "schedule_start_hour", cfg->schedule_start_hour);
+    cJSON_AddNumberToObject(b, "schedule_end_hour", cfg->schedule_end_hour);
+    cJSON_AddNumberToObject(b, "bwlimit_mbps", cfg->bwlimit_mbps);
+    cJSON_AddBoolToObject(b, "events_only", cfg->events_only);
+    cJSON_AddBoolToObject(b, "include_existing", cfg->include_existing);
+    cJSON_AddBoolToObject(b, "delete_local", cfg->delete_local);
+    cJSON_AddNumberToObject(b, "reserve_gb", cfg->reserve_gb);
+    cJSON_AddNumberToObject(b, "keep_days", cfg->keep_days);
+    cJSON_AddNumberToObject(b, "since", (double)cfg->backup_since);
+    cJSON *cams = cJSON_AddArrayToObject(b, "cameras");
+    for (const char *p = cfg->cameras; *p;) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        char name[512];
+        snprintf(name, sizeof(name), "%.*s", (int)(n < sizeof(name) - 1 ? n : sizeof(name) - 1), p);
+        cJSON_AddItemToArray(cams, cJSON_CreateString(name));
+        p += n;
+        if (*p == '\n') p++;
+    }
     char *json = cJSON_Print(doc);
     cJSON_Delete(doc);
     if (!json) return -1;
@@ -191,13 +297,22 @@ static int save_config_file(const nas_config_t *cfg) {
 
 /* ---- mount ------------------------------------------------------------- */
 
-/* True when @p path is a mount point (different device than its parent). */
+/* True when @p path is a mount point. Reads the mount table rather than
+   calling stat() on the share, which hangs while the NAS does not answer. */
 static bool is_mount_point(const char *path) {
-    struct stat st, parent_st;
-    char parent[PATH_MAX];
-    snprintf(parent, sizeof(parent), "%s/..", path);
-    if (stat(path, &st) != 0 || stat(parent, &parent_st) != 0) return false;
-    return st.st_dev != parent_st.st_dev;
+    FILE *fp = fopen("/proc/self/mountinfo", "r");
+    if (!fp) return false;
+    char line[4096];
+    bool found = false;
+    while (!found && fgets(line, sizeof(line), fp)) {
+        /* fields: id parent major:minor root mount-point ... */
+        char mount_point[PATH_MAX];
+        if (sscanf(line, "%*s %*s %*s %*s %4095s", mount_point) == 1 && strcmp(mount_point, path) == 0) {
+            found = true;
+        }
+    }
+    fclose(fp);
+    return found;
 }
 
 /* Run mount(8) with @p argv; capture its message in @p err. */
@@ -472,7 +587,12 @@ int nas_connect(const nas_config_t *cfg_in, char *err, size_t err_len) {
 
     cfg.enabled = true;
     pthread_mutex_lock(&nas_mutex);
+    /* Backup keeps its start time when it stays on (the backlog is kept) */
+    if (is_backup_role(&cfg)) {
+        cfg.backup_since = is_backup_role(&nas_cfg) && nas_cfg.backup_since > 0 ? nas_cfg.backup_since : time(NULL);
+    }
     nas_cfg = cfg;
+    failed_checks = 0;
     memset(&nas_status, 0, sizeof(nas_status));
     nas_status.state = NAS_STATE_CONNECTED;
     nas_status.last_check = time(NULL);
@@ -483,8 +603,63 @@ int nas_connect(const nas_config_t *cfg_in, char *err, size_t err_len) {
     if (save_config_file(&cfg) != 0) {
         snprintf(err, err_len, "Connected, but the NAS settings could not be saved (they will be lost on restart)");
     }
-    log_info("NAS connected: %s //%s%s%s; new recordings go to %s",
-             cfg.type, cfg.server, cfg.share[0] == '/' ? "" : "/", cfg.share, NAS_RECORDINGS_DIR);
+    if (is_backup_role(&cfg)) {
+        mkdir(NAS_BACKUP_DIR, 0755);
+        log_info("NAS connected as backup: %s //%s%s%s; recordings are copied to %s",
+                 cfg.type, cfg.server, cfg.share[0] == '/' ? "" : "/", cfg.share, NAS_BACKUP_DIR);
+        nas_backup_wake();
+    } else {
+        log_info("NAS connected: %s //%s%s%s; new recordings go to %s",
+                 cfg.type, cfg.server, cfg.share[0] == '/' ? "" : "/", cfg.share, NAS_RECORDINGS_DIR);
+    }
+    return 0;
+}
+
+int nas_update_options(const nas_config_t *in, char *err, size_t err_len) {
+    nas_config_t cfg;
+    pthread_mutex_lock(&nas_mutex);
+    if (!nas_cfg.enabled) {
+        pthread_mutex_unlock(&nas_mutex);
+        snprintf(err, err_len, "Connect the NAS first");
+        return -1;
+    }
+    cfg = nas_cfg;
+    pthread_mutex_unlock(&nas_mutex);
+
+    copy_str(cfg.role, sizeof(cfg.role), in->role);
+    copy_str(cfg.backup_when, sizeof(cfg.backup_when), in->backup_when);
+    cfg.schedule_start_hour = in->schedule_start_hour;
+    cfg.schedule_end_hour = in->schedule_end_hour;
+    cfg.bwlimit_mbps = in->bwlimit_mbps;
+    cfg.events_only = in->events_only;
+    cfg.include_existing = in->include_existing;
+    cfg.delete_local = in->delete_local;
+    cfg.reserve_gb = in->reserve_gb;
+    cfg.keep_days = in->keep_days;
+    copy_str(cfg.cameras, sizeof(cfg.cameras), in->cameras);
+    if (validate_options(&cfg, err, err_len) != 0) return -1;
+
+    pthread_mutex_lock(&nas_mutex);
+    bool was_backup = is_backup_role(&nas_cfg);
+    if (is_backup_role(&cfg) && (!was_backup || cfg.backup_since <= 0)) cfg.backup_since = time(NULL);
+    if (!nas_cfg.enabled) {  /* disconnected meanwhile */
+        pthread_mutex_unlock(&nas_mutex);
+        snprintf(err, err_len, "Connect the NAS first");
+        return -1;
+    }
+    nas_cfg = cfg;
+    pthread_mutex_unlock(&nas_mutex);
+
+    if (is_backup_role(&cfg)) mkdir(NAS_BACKUP_DIR, 0755);
+    if (was_backup != is_backup_role(&cfg)) {
+        log_info(is_backup_role(&cfg)
+                     ? "NAS role changed to backup: recordings are made on the local disk and copied to the NAS"
+                     : "NAS role changed to recording: new recordings go to the NAS");
+    }
+    nas_backup_wake();
+    if (save_config_file(&cfg) != 0) {
+        snprintf(err, err_len, "Saved for now, but the NAS settings could not be written (they will be lost on restart)");
+    }
     return 0;
 }
 
@@ -493,6 +668,7 @@ int nas_disconnect(void) {
     pthread_mutex_lock(&nas_mutex);
     nas_cfg.enabled = false;
     cfg = nas_cfg;
+    failed_checks = 0;
     memset(&nas_status, 0, sizeof(nas_status));
     nas_status.state = NAS_STATE_DISABLED;
     pthread_mutex_unlock(&nas_mutex);
@@ -515,6 +691,18 @@ void nas_get_status(nas_status_t *out) {
     pthread_mutex_unlock(&nas_mutex);
 }
 
+/* New recordings go to the NAS: main role and answering. Caller holds nas_mutex. */
+static bool record_to_nas_locked(void) {
+    return nas_status.state == NAS_STATE_CONNECTED && !is_backup_role(&nas_cfg);
+}
+
+bool nas_backup_ready(void) {
+    pthread_mutex_lock(&nas_mutex);
+    bool ready = nas_cfg.enabled && is_backup_role(&nas_cfg) && nas_status.state == NAS_STATE_CONNECTED;
+    pthread_mutex_unlock(&nas_mutex);
+    return ready;
+}
+
 bool nas_unavailable(void) {
     pthread_mutex_lock(&nas_mutex);
     bool unavailable = nas_cfg.enabled && nas_status.state != NAS_STATE_CONNECTED;
@@ -533,14 +721,14 @@ bool nas_path_out_of_reach(const char *path) {
 
 void nas_recording_root(const char *local_root, char *out, size_t out_len) {
     pthread_mutex_lock(&nas_mutex);
-    bool use_nas = nas_status.state == NAS_STATE_CONNECTED;
+    bool use_nas = record_to_nas_locked();
     pthread_mutex_unlock(&nas_mutex);
     snprintf(out, out_len, "%s", use_nas ? NAS_RECORDINGS_DIR : (local_root ? local_root : ""));
 }
 
 void nas_mp4_recording_dir(char *out, size_t out_len) {
     pthread_mutex_lock(&nas_mutex);
-    bool use_nas = nas_status.state == NAS_STATE_CONNECTED;
+    bool use_nas = record_to_nas_locked();
     pthread_mutex_unlock(&nas_mutex);
     if (use_nas) {
         snprintf(out, out_len, "%s/mp4", NAS_RECORDINGS_DIR);
@@ -611,19 +799,54 @@ static void reap_stuck_probes(void) {
     }
 }
 
+/* Body of the probe child: write, read back and delete a small file, then
+   report the free space through @p fd. System calls only (forked from a
+   multi-threaded process). Returns the exit code. */
+static int probe_child(int fd) {
+    static const char probe[] = NAS_RECORDINGS_DIR "/.lightnvr-write-test";
+    char buf[4] = {0};
+    if (mkdir(NAS_RECORDINGS_DIR, 0755) != 0 && errno != EEXIST) return 1;
+    int f = open(probe, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (f < 0) return 1;
+    bool ok = write(f, "ok\n", 3) == 3;
+    ok = close(f) == 0 && ok;
+    f = ok ? open(probe, O_RDONLY) : -1;
+    ok = f >= 0 && read(f, buf, 3) == 3 && memcmp(buf, "ok\n", 3) == 0;
+    if (f >= 0) close(f);
+    unlink(probe);
+    if (!ok) return 1;
+    struct statvfs vfs;
+    uint64_t space[2] = {0, 0};
+    if (statvfs(NAS_MOUNT_POINT, &vfs) == 0) {
+        space[0] = (uint64_t)vfs.f_blocks * vfs.f_frsize;
+        space[1] = (uint64_t)vfs.f_bavail * vfs.f_frsize;
+    }
+    return write(fd, space, sizeof(space)) == (ssize_t)sizeof(space) ? 0 : 1;
+}
+
 /* Write and read back a file on the NAS in a child process, so a NAS that
    stopped answering is noticed within NAS_PROBE_TIMEOUT_SEC instead of the
-   share's own (much longer) timeout. Fills @p space on success. */
+   share's own (much longer) timeout. Fills @p space on success. The monitor
+   itself never touches the share (that could block it). */
 static bool probe_nas(nas_status_t *space, char *err, size_t err_len) {
     reap_stuck_probes();
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        snprintf(err, err_len, "Cannot check the NAS: %s", strerror(errno));
+        return false;
+    }
     pid_t pid = fork();
     if (pid < 0) {
-        return check_writable(NAS_RECORDINGS_DIR, err, err_len) == 0;
+        close(pipefd[0]);
+        close(pipefd[1]);
+        snprintf(err, err_len, "Cannot check the NAS: %s", strerror(errno));
+        return false;
     }
     if (pid == 0) {
-        char child_err[8];
-        _exit(check_writable(NAS_RECORDINGS_DIR, child_err, sizeof(child_err)) == 0 ? 0 : 1);
+        close(pipefd[0]);
+        _exit(probe_child(pipefd[1]));
     }
+    close(pipefd[1]);
     int status = 0;
     time_t deadline = time(NULL) + NAS_PROBE_TIMEOUT_SEC;
     pid_t done;
@@ -635,14 +858,21 @@ static bool probe_nas(nas_status_t *space, char *err, size_t err_len) {
         for (size_t i = 0; i < sizeof(stuck_probes) / sizeof(stuck_probes[0]); i++) {
             if (stuck_probes[i] == 0) { stuck_probes[i] = pid; break; }
         }
+        close(pipefd[0]);
         snprintf(err, err_len, "The NAS stopped answering (no reply within %d seconds)", NAS_PROBE_TIMEOUT_SEC);
         return false;
     }
+    uint64_t result[2] = {0, 0};
+    bool got_space = read(pipefd[0], result, sizeof(result)) == (ssize_t)sizeof(result);
+    close(pipefd[0]);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         snprintf(err, err_len, "Cannot write to the NAS");
         return false;
     }
-    fill_space(NAS_MOUNT_POINT, space);
+    if (got_space) {
+        space->total_bytes = result[0];
+        space->free_bytes = result[1];
+    }
     return true;
 }
 
@@ -675,14 +905,19 @@ static void nas_check(void) {
     }
 
     pthread_mutex_lock(&nas_mutex);
+    bool backup = is_backup_role(&nas_cfg);
     if (nas_cfg.enabled) {  /* not disconnected meanwhile */
         nas_status.last_check = time(NULL);
         if (ok) {
+            failed_checks = 0;
             if (nas_status.state != NAS_STATE_CONNECTED) nas_status.connected_since = nas_status.last_check;
             nas_status.state = NAS_STATE_CONNECTED;
             nas_status.total_bytes = space.total_bytes;
             nas_status.free_bytes = space.free_bytes;
             nas_status.error[0] = '\0';
+        } else if (nas_status.state == NAS_STATE_CONNECTED && ++failed_checks < NAS_FAILS_BEFORE_UNAVAILABLE) {
+            /* one slow answer: keep going, check again soon */
+            log_warn("NAS check failed (%s); checking again before switching", err);
         } else {
             nas_status.state = NAS_STATE_UNAVAILABLE;
             copy_str(nas_status.error, sizeof(nas_status.error), err);
@@ -693,7 +928,14 @@ static void nas_check(void) {
 
     if (before != after) {
         if (after == NAS_STATE_CONNECTED) {
-            log_info("NAS available: new recordings go to %s", NAS_RECORDINGS_DIR);
+            if (backup) {
+                log_info("NAS available: backup copies to %s resume", NAS_BACKUP_DIR);
+                nas_backup_wake();
+            } else {
+                log_info("NAS available: new recordings go to %s", NAS_RECORDINGS_DIR);
+            }
+        } else if (backup) {
+            log_error("NAS not available (%s): backup paused; recordings stay on the local disk until it is back", err);
         } else {
             log_error("NAS not available (%s): new recordings go to the local disk until it is back", err);
         }
@@ -706,7 +948,8 @@ static void *monitor_func(void *arg) {
     while (monitor_running) {
         struct timespec until;
         clock_gettime(CLOCK_REALTIME, &until);
-        until.tv_sec += NAS_MONITOR_INTERVAL_SEC;
+        /* after a failed check, check again sooner */
+        until.tv_sec += __atomic_load_n(&failed_checks, __ATOMIC_RELAXED) > 0 ? 5 : NAS_MONITOR_INTERVAL_SEC;
         pthread_cond_timedwait(&monitor_cond, &monitor_mutex, &until);
         if (!monitor_running) break;
         pthread_mutex_unlock(&monitor_mutex);

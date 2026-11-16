@@ -72,6 +72,7 @@ void init_recordings_system(void);
 #include <signal.h>
 #include <fcntl.h>
 #include "storage/nas_storage.h"
+#include "storage/nas_backup.h"
 #include "storage/cloud_storage.h"
 
 // Global flag for graceful shutdown
@@ -787,7 +788,8 @@ int main(int argc, char *argv[]) {
             if (slash && slash != config_dir) *slash = '\0';
         }
         nas_storage_init(config_dir);
-        // Cloud uploads (needs the database, which is open by now)
+        // NAS backup copies and cloud uploads (need the database, which is open by now)
+        nas_backup_init();
         cloud_storage_init(config_dir);
     }
 
@@ -1580,6 +1582,7 @@ cleanup:
 
         log_info("Shutting down storage manager...");
         shutdown_storage_manager();
+        nas_backup_shutdown();
         nas_storage_shutdown();
         cloud_storage_shutdown();
 
@@ -1684,6 +1687,7 @@ cleanup:
         shutdown_stream_state_adapter();
         shutdown_stream_state_manager();
         shutdown_storage_manager();
+        nas_backup_shutdown();
         nas_storage_shutdown();
         cloud_storage_shutdown();
 

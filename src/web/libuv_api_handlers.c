@@ -133,6 +133,7 @@ int register_all_libuv_handlers(http_server_handle_t server) {
     http_server_register_handler(server, "/api/storage/nas/test", "POST", handle_post_nas_test);
     http_server_register_handler(server, "/api/storage/nas/connect", "POST", handle_post_nas_connect);
     http_server_register_handler(server, "/api/storage/nas/disconnect", "POST", handle_post_nas_disconnect);
+    http_server_register_handler(server, "/api/storage/nas/options", "POST", handle_post_nas_options);
     http_server_register_handler(server, "/api/storage/cloud", "GET", handle_get_cloud_settings);
     http_server_register_handler(server, "/api/storage/cloud/test", "POST", handle_post_cloud_test);
     http_server_register_handler(server, "/api/storage/cloud/connect", "POST", handle_post_cloud_connect);
