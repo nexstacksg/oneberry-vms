@@ -472,7 +472,8 @@ export function NasStorageSettings({ canModify }) {
                 <span>Mbit/s</span>
               </div>
               <span class="hint text-sm text-muted-foreground block mt-1">
-                0 = no limit. On a 100 Mbit network keep it below the free capacity (e.g. 40–60) so live view and cameras are not slowed down.
+                0 = no limit. It must stay above what the cameras record (see "Waiting" above: if it keeps growing, raise the limit);
+                on a 100 Mbit network leave some room for live view.
               </span>
             </div>
           </div>
