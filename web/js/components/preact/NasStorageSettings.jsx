@@ -1,10 +1,9 @@
 /**
- * Settings → Network storage (NAS): connect an NFS or SMB share and choose,
- * as in Nx Witness, how it is used:
- *   - Recording: new recordings go straight to the NAS (needs a fast network).
- *   - Backup: cameras record to this server's disk; finished recordings are
- *     copied to the NAS in the background (real time or on a schedule, at a
- *     limited speed), and stay playable from the NAS after the local copy goes.
+ * Settings → Network storage (NAS): connect an NFS or SMB share as backup
+ * storage, like Nx Witness backup. Cameras record to this server's disk;
+ * finished recordings are copied to the NAS in the background (real time or
+ * on a schedule, at a limited speed), and stay playable from the NAS after
+ * the local copy goes.
  */
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { fetchJSON } from '../../query-client.js';
@@ -153,7 +152,6 @@ export function NasStorageSettings({ canModify }) {
   const [loaded, setLoaded] = useState(false);
   const [saved, setSaved] = useState(null);
   const [form, setForm] = useState({ type: 'nfs', server: '', share: '', username: '', password: '', version: '4.1' });
-  const [role, setRole] = useState('backup');
   const [backup, setBackup] = useState(DEFAULT_BACKUP);
   const [cameraNames, setCameraNames] = useState([]);
   const [busy, setBusy] = useState('');
@@ -170,8 +168,6 @@ export function NasStorageSettings({ canModify }) {
         password: '',
         version: data.version || DEFAULT_VERSION[data.type || 'nfs'],
       });
-      // Not connected yet: suggest backup (works on any network)
-      setRole(data.enabled ? (data.role || 'main') : 'backup');
       setBackup(backupFrom(data));
     }
   };
@@ -220,7 +216,7 @@ export function NasStorageSettings({ canModify }) {
 
   const options = () => {
     const { cameraMode, ...rest } = backup;
-    return { role, backup: { ...rest, cameras: cameraMode === 'all' ? [] : backup.cameras } };
+    return { role: 'backup', backup: { ...rest, cameras: cameraMode === 'all' ? [] : backup.cameras } };
   };
   const body = () => JSON.stringify({
     type: form.type,
@@ -249,9 +245,7 @@ export function NasStorageSettings({ canModify }) {
     }
   };
 
-  const connectedMessage = (data) => (data.role === 'backup'
-    ? 'NAS connected as backup. Recordings are copied to the NAS in the background.'
-    : 'NAS connected. New recordings are saved on the NAS.');
+  const connectedMessage = () => 'NAS connected. Recordings are copied to the NAS in the background.';
 
   const connect = async () => {
     setBusy('connect');
@@ -276,7 +270,7 @@ export function NasStorageSettings({ canModify }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(options()), timeout: 30000,
       });
       applySaved(result, true);
-      showStatusMessage(result.warning || (result.role === 'backup' ? 'Backup settings saved.' : 'NAS now used for recording.'),
+      showStatusMessage(result.warning || 'Backup settings saved.',
         result.warning ? 'warning' : 'success', 5000);
     } catch (error) {
       showStatusMessage(error.message || 'Could not save', 'error', 6000);
@@ -286,9 +280,7 @@ export function NasStorageSettings({ canModify }) {
   };
 
   const disconnect = async () => {
-    const text = saved?.role === 'backup'
-      ? 'Disconnect the backup NAS? Copying stops. Backups already on the NAS stay there; recordings that only exist on the NAS cannot be played while it is disconnected.'
-      : 'Disconnect the NAS? New recordings will be saved on this server\'s disk. Recordings already on the NAS stay there, but cannot be played while it is disconnected.';
+    const text = 'Disconnect the backup NAS? Copying stops. Backups already on the NAS stay there; recordings that only exist on the NAS cannot be played while it is disconnected.';
     if (!window.confirm(text)) return;
     setBusy('disconnect');
     try {
@@ -308,20 +300,15 @@ export function NasStorageSettings({ canModify }) {
 
   const status = saved?.status || { state: 'disabled' };
   const enabled = Boolean(saved?.enabled);
-  const savedRole = saved?.role || 'main';
   const space = status.total_bytes ? `${formatBytes(status.free_bytes)} free of ${formatBytes(status.total_bytes)}` : '';
   const serverLabel = `${saved?.type === 'smb' ? 'SMB' : 'NFS'} //${saved?.server}`;
   let statusView;
   if (!enabled) {
     statusView = { tone: 'muted', title: 'Not connected', text: 'Recordings are saved on this server\'s disk.' };
-  } else if (savedRole === 'backup') {
+  } else {
     statusView = status.state === 'connected'
       ? { tone: 'ok', title: `Backup NAS connected: ${serverLabel}`, text: `Cameras record to this server; recordings are copied to the NAS.${space ? ` ${space}.` : ''}` }
       : { tone: 'bad', title: 'Backup NAS not reachable', text: `Recording continues on this server's disk; copying resumes when the NAS is back.${status.error ? ` (${status.error})` : ''}` };
-  } else {
-    statusView = status.state === 'connected'
-      ? { tone: 'ok', title: `Connected to ${serverLabel}`, text: `New recordings are saved on the NAS.${space ? ` ${space}.` : ''}` }
-      : { tone: 'bad', title: 'NAS not reachable', text: `Recordings are saved on this server's disk until the NAS is back.${status.error ? ` (${status.error})` : ''}` };
   }
   const toneStyle = {
     ok: { borderColor: 'hsl(142 70% 40% / 0.45)', background: 'hsl(142 70% 40% / 0.08)' },
@@ -331,16 +318,16 @@ export function NasStorageSettings({ canModify }) {
   const dotColor = { ok: 'hsl(142 70% 40%)', bad: 'hsl(0 75% 50%)', muted: 'hsl(var(--muted-foreground))' }[statusView.tone];
   const connectionChanged = enabled && (form.type !== saved.type || form.server.trim() !== saved.server || form.share.trim() !== saved.share
     || form.username.trim() !== (saved.username || '') || form.password !== '' || form.version !== saved.version);
-  const optionsChanged = enabled && (role !== savedRole || (role === 'backup' && !sameBackup(backup, savedBackup)));
+  const optionsChanged = enabled && (saved.role !== 'backup' || !sameBackup(backup, savedBackup));
   const disabled = !canModify || Boolean(busy);
   const cameraMode = backup.cameras.length > 0 || backup.cameraMode === 'selected' ? 'selected' : 'all';
-  const noCamerasChosen = role === 'backup' && cameraMode === 'selected' && backup.cameras.length === 0;
+  const noCamerasChosen = cameraMode === 'selected' && backup.cameras.length === 0;
 
   return (
     <div class="settings-group bg-card text-card-foreground rounded-lg shadow p-4" data-testid="nas-settings">
       <h3 class="text-lg font-semibold mb-4 pb-2 border-b border-border">Network Storage (NAS)</h3>
 
-      <div data-testid="nas-status" data-state={enabled ? status.state : 'disabled'} data-role={enabled ? savedRole : ''}
+      <div data-testid="nas-status" data-state={enabled ? status.state : 'disabled'} data-role={enabled ? 'backup' : ''}
         style={{ border: '1px solid', ...toneStyle, borderRadius: '0.5rem', padding: '0.75rem 1rem', marginBottom: '1rem', display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
         <span aria-hidden="true" style={{ width: '0.6rem', height: '0.6rem', borderRadius: '999px', background: dotColor, marginTop: '0.4rem', flex: '0 0 auto' }} />
         <div>
@@ -349,7 +336,7 @@ export function NasStorageSettings({ canModify }) {
         </div>
       </div>
 
-      {enabled && savedRole === 'backup' && <BackupStatus status={saved?.backup?.status} />}
+      {enabled && <BackupStatus status={saved?.backup?.status} />}
 
       <div class={rowClass}>
         <span class="font-medium">Type</span>
@@ -421,126 +408,116 @@ export function NasStorageSettings({ canModify }) {
         </div>
       </div>
 
-      <div class={rowClass} style={{ paddingTop: '0.75rem', borderTop: '1px solid hsl(var(--border))' }}>
-        <span class="font-medium">Use the NAS for</span>
-        <div class="col-span-2" role="radiogroup" aria-label="NAS role" style={{ display: 'grid', gap: '0.6rem' }}>
-          <Radio name="nas-role" value="backup" testId="nas-role-backup" checked={role === 'backup'} disabled={disabled}
-            onChange={() => setRole('backup')} label="Backup (recommended)"
-            hint="Cameras record to this server's disk; recordings are copied to the NAS in the background. Recording never depends on the NAS or the network." />
-          <Radio name="nas-role" value="main" testId="nas-role-main" checked={role === 'main'} disabled={disabled}
-            onChange={() => setRole('main')} label="Recording"
-            hint="Cameras record straight to the NAS. Needs a fast, reliable network (gigabit) between this server and the NAS." />
-        </div>
+      <div class="text-sm text-muted-foreground" style={{ paddingTop: '0.75rem', borderTop: '1px solid hsl(var(--border))', marginBottom: '1rem' }}>
+        <span class="font-medium text-foreground">Backup settings.</span> Cameras always record to this server's disk; recordings are copied to the NAS in the background, so recording never depends on the NAS or the network.
       </div>
 
-      {role === 'backup' && (
-        <div data-testid="nas-backup-options">
-          <div class={rowClass}>
-            <span class="font-medium">When to copy</span>
-            <div class="col-span-2" style={{ display: 'grid', gap: '0.5rem' }}>
-              <Radio name="nas-backup-when" value="realtime" testId="nas-backup-realtime" checked={backup.when === 'realtime'} disabled={disabled}
-                onChange={() => updateBackup('when', 'realtime')} label="Real time" hint="Each recording is copied as soon as it is finished." />
-              <Radio name="nas-backup-when" value="schedule" testId="nas-backup-schedule" checked={backup.when === 'schedule'} disabled={disabled}
-                onChange={() => updateBackup('when', 'schedule')} label="On a schedule" hint="Copy only in a daily time window, e.g. at night." />
-              {backup.when === 'schedule' && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', paddingLeft: '1.5rem' }}>
-                  <span>From</span>
-                  <select class={selectClass} data-testid="nas-backup-from" value={backup.schedule_start_hour} disabled={disabled}
-                    onChange={(event) => updateBackup('schedule_start_hour', Number(event.currentTarget.value))}>
-                    {HOURS.map((hour) => <option key={hour} value={hour}>{hourLabel(hour)}</option>)}
-                  </select>
-                  <span>to</span>
-                  <select class={selectClass} data-testid="nas-backup-to" value={backup.schedule_end_hour} disabled={disabled}
-                    onChange={(event) => updateBackup('schedule_end_hour', Number(event.currentTarget.value))}>
-                    {HOURS.map((hour) => <option key={hour} value={hour}>{hourLabel(hour)}</option>)}
-                  </select>
-                  {backup.schedule_start_hour === backup.schedule_end_hour && (
-                    <span class="text-sm" style={{ color: 'hsl(0 75% 50%)' }}>Start and end must differ.</span>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div class={rowClass}>
-            <label for="nas-backup-bw" class="font-medium">Speed limit</label>
-            <div class="col-span-2">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <input id="nas-backup-bw" data-testid="nas-backup-bw" type="number" min="0" step="1" class={inputClass} style={{ maxWidth: '8rem' }}
-                  value={backup.bwlimit_mbps} disabled={disabled}
-                  onInput={(event) => updateBackup('bwlimit_mbps', Math.max(0, parseInt(event.currentTarget.value, 10) || 0))} />
-                <span>Mbit/s</span>
+      <div data-testid="nas-backup-options">
+        <div class={rowClass}>
+          <span class="font-medium">When to copy</span>
+          <div class="col-span-2" style={{ display: 'grid', gap: '0.5rem' }}>
+            <Radio name="nas-backup-when" value="realtime" testId="nas-backup-realtime" checked={backup.when === 'realtime'} disabled={disabled}
+              onChange={() => updateBackup('when', 'realtime')} label="Real time" hint="Each recording is copied as soon as it is finished." />
+            <Radio name="nas-backup-when" value="schedule" testId="nas-backup-schedule" checked={backup.when === 'schedule'} disabled={disabled}
+              onChange={() => updateBackup('when', 'schedule')} label="On a schedule" hint="Copy only in a daily time window, e.g. at night." />
+            {backup.when === 'schedule' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', paddingLeft: '1.5rem' }}>
+                <span>From</span>
+                <select class={selectClass} data-testid="nas-backup-from" value={backup.schedule_start_hour} disabled={disabled}
+                  onChange={(event) => updateBackup('schedule_start_hour', Number(event.currentTarget.value))}>
+                  {HOURS.map((hour) => <option key={hour} value={hour}>{hourLabel(hour)}</option>)}
+                </select>
+                <span>to</span>
+                <select class={selectClass} data-testid="nas-backup-to" value={backup.schedule_end_hour} disabled={disabled}
+                  onChange={(event) => updateBackup('schedule_end_hour', Number(event.currentTarget.value))}>
+                  {HOURS.map((hour) => <option key={hour} value={hour}>{hourLabel(hour)}</option>)}
+                </select>
+                {backup.schedule_start_hour === backup.schedule_end_hour && (
+                  <span class="text-sm" style={{ color: 'hsl(0 75% 50%)' }}>Start and end must differ.</span>
+                )}
               </div>
-              <span class="hint text-sm text-muted-foreground block mt-1">
-                0 = no limit. It must stay above what the cameras record (see "Waiting" above: if it keeps growing, raise the limit);
-                on a 100 Mbit network leave some room for live view.
-              </span>
-            </div>
+            )}
           </div>
+        </div>
 
-          <div class={rowClass}>
-            <span class="font-medium">What to copy</span>
-            <div class="col-span-2" style={{ display: 'grid', gap: '0.5rem' }}>
-              <Radio name="nas-backup-what" value="all" checked={!backup.events_only} disabled={disabled}
-                onChange={() => updateBackup('events_only', false)} label="All recordings" />
-              <Radio name="nas-backup-what" value="events" testId="nas-backup-events" checked={backup.events_only} disabled={disabled}
-                onChange={() => updateBackup('events_only', true)} label="Only motion and detection recordings" />
-              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}>
-                <input type="checkbox" data-testid="nas-backup-existing" checked={backup.include_existing} disabled={disabled}
-                  onChange={(event) => updateBackup('include_existing', event.currentTarget.checked)}
-                  style={{ accentColor: 'hsl(var(--primary))', marginTop: '0.3rem' }} />
-                <span>Also copy recordings made before backup was turned on</span>
-              </label>
+        <div class={rowClass}>
+          <label for="nas-backup-bw" class="font-medium">Speed limit</label>
+          <div class="col-span-2">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <input id="nas-backup-bw" data-testid="nas-backup-bw" type="number" min="0" step="1" class={inputClass} style={{ maxWidth: '8rem' }}
+                value={backup.bwlimit_mbps} disabled={disabled}
+                onInput={(event) => updateBackup('bwlimit_mbps', Math.max(0, parseInt(event.currentTarget.value, 10) || 0))} />
+              <span>Mbit/s</span>
             </div>
+            <span class="hint text-sm text-muted-foreground block mt-1">
+              0 = no limit. It must stay above what the cameras record (see "Waiting" above: if it keeps growing, raise the limit);
+              on a 100 Mbit network leave some room for live view.
+            </span>
           </div>
+        </div>
 
-          <div class={rowClass}>
-            <span class="font-medium">Cameras</span>
-            <div class="col-span-2" style={{ display: 'grid', gap: '0.5rem' }}>
-              <Radio name="nas-backup-cams" value="all" checked={cameraMode === 'all'} disabled={disabled}
-                onChange={() => setBackup((previous) => ({ ...previous, cameras: [], cameraMode: 'all' }))} label="All cameras" />
-              <Radio name="nas-backup-cams" value="selected" testId="nas-backup-selected" checked={cameraMode === 'selected'} disabled={disabled}
-                onChange={() => updateBackup('cameraMode', 'selected')} label="Selected cameras" />
-              {cameraMode === 'selected' && (
-                <CameraPicker cameras={cameraNames} selected={backup.cameras} disabled={disabled}
-                  onChange={(cameras) => setBackup((previous) => ({ ...previous, cameras, cameraMode: 'selected' }))} />
-              )}
+        <div class={rowClass}>
+          <span class="font-medium">What to copy</span>
+          <div class="col-span-2" style={{ display: 'grid', gap: '0.5rem' }}>
+            <Radio name="nas-backup-what" value="all" checked={!backup.events_only} disabled={disabled}
+              onChange={() => updateBackup('events_only', false)} label="All recordings" />
+            <Radio name="nas-backup-what" value="events" testId="nas-backup-events" checked={backup.events_only} disabled={disabled}
+              onChange={() => updateBackup('events_only', true)} label="Only motion and detection recordings" />
+            <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}>
+              <input type="checkbox" data-testid="nas-backup-existing" checked={backup.include_existing} disabled={disabled}
+                onChange={(event) => updateBackup('include_existing', event.currentTarget.checked)}
+                style={{ accentColor: 'hsl(var(--primary))', marginTop: '0.3rem' }} />
+              <span>Also copy recordings made before backup was turned on</span>
+            </label>
+          </div>
+        </div>
+
+        <div class={rowClass}>
+          <span class="font-medium">Cameras</span>
+          <div class="col-span-2" style={{ display: 'grid', gap: '0.5rem' }}>
+            <Radio name="nas-backup-cams" value="all" checked={cameraMode === 'all'} disabled={disabled}
+              onChange={() => setBackup((previous) => ({ ...previous, cameras: [], cameraMode: 'all' }))} label="All cameras" />
+            <Radio name="nas-backup-cams" value="selected" testId="nas-backup-selected" checked={cameraMode === 'selected'} disabled={disabled}
+              onChange={() => updateBackup('cameraMode', 'selected')} label="Selected cameras" />
+            {cameraMode === 'selected' && (
+              <CameraPicker cameras={cameraNames} selected={backup.cameras} disabled={disabled}
+                onChange={(cameras) => setBackup((previous) => ({ ...previous, cameras, cameraMode: 'selected' }))} />
+            )}
+          </div>
+        </div>
+
+        <div class={rowClass}>
+          <span class="font-medium">After backup</span>
+          <div class="col-span-2" style={{ display: 'grid', gap: '0.5rem' }}>
+            <Radio name="nas-backup-local" value="keep" checked={!backup.delete_local} disabled={disabled}
+              onChange={() => updateBackup('delete_local', false)} label="Keep the local copy"
+              hint="Two copies. Local retention removes the local copy later; the recording then plays from the NAS." />
+            <Radio name="nas-backup-local" value="delete" testId="nas-backup-move" checked={backup.delete_local} disabled={disabled}
+              onChange={() => updateBackup('delete_local', true)} label="Delete the local copy (move to the NAS)"
+              hint="Frees this server's disk right after each copy is checked. The recording then exists only on the NAS." />
+          </div>
+        </div>
+
+        <div class={rowClass}>
+          <span class="font-medium">Backup retention</span>
+          <div class="col-span-2" style={{ display: 'grid', gap: '0.5rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <span>Keep</span>
+              <input type="number" min="1" step="1" data-testid="nas-backup-reserve" class={inputClass} style={{ maxWidth: '7rem' }}
+                value={backup.reserve_gb} disabled={disabled}
+                onInput={(event) => updateBackup('reserve_gb', Math.max(1, parseInt(event.currentTarget.value, 10) || 1))} />
+              <span>GB free on the NAS (the oldest backups are deleted first)</span>
             </div>
-          </div>
-
-          <div class={rowClass}>
-            <span class="font-medium">After backup</span>
-            <div class="col-span-2" style={{ display: 'grid', gap: '0.5rem' }}>
-              <Radio name="nas-backup-local" value="keep" checked={!backup.delete_local} disabled={disabled}
-                onChange={() => updateBackup('delete_local', false)} label="Keep the local copy"
-                hint="Two copies. Local retention removes the local copy later; the recording then plays from the NAS." />
-              <Radio name="nas-backup-local" value="delete" testId="nas-backup-move" checked={backup.delete_local} disabled={disabled}
-                onChange={() => updateBackup('delete_local', true)} label="Delete the local copy (move to the NAS)"
-                hint="Frees this server's disk right after each copy is checked. The recording then exists only on the NAS." />
-            </div>
-          </div>
-
-          <div class={rowClass}>
-            <span class="font-medium">Backup retention</span>
-            <div class="col-span-2" style={{ display: 'grid', gap: '0.5rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                <span>Keep</span>
-                <input type="number" min="1" step="1" data-testid="nas-backup-reserve" class={inputClass} style={{ maxWidth: '7rem' }}
-                  value={backup.reserve_gb} disabled={disabled}
-                  onInput={(event) => updateBackup('reserve_gb', Math.max(1, parseInt(event.currentTarget.value, 10) || 1))} />
-                <span>GB free on the NAS (the oldest backups are deleted first)</span>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                <span>Delete backups older than</span>
-                <input type="number" min="0" step="1" data-testid="nas-backup-days" class={inputClass} style={{ maxWidth: '7rem' }}
-                  value={backup.keep_days} disabled={disabled}
-                  onInput={(event) => updateBackup('keep_days', Math.max(0, parseInt(event.currentTarget.value, 10) || 0))} />
-                <span>days (0 = keep until the NAS is full)</span>
-              </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <span>Delete backups older than</span>
+              <input type="number" min="0" step="1" data-testid="nas-backup-days" class={inputClass} style={{ maxWidth: '7rem' }}
+                value={backup.keep_days} disabled={disabled}
+                onInput={(event) => updateBackup('keep_days', Math.max(0, parseInt(event.currentTarget.value, 10) || 0))} />
+              <span>days (0 = keep until the NAS is full)</span>
             </div>
           </div>
         </div>
-      )}
+      </div>
 
       {testResult && (
         <div data-testid="nas-test-result" role="status"
@@ -580,9 +557,7 @@ export function NasStorageSettings({ canModify }) {
         <p class="text-sm" style={{ marginTop: '0.5rem', color: 'hsl(0 75% 50%)', textAlign: 'right' }}>Select at least one camera, or choose All cameras.</p>
       )}
       <p class="text-sm text-muted-foreground" style={{ marginTop: '0.75rem' }}>
-        {role === 'backup'
-          ? 'Backups are checked against the recording before they count. Recordings that are only on the NAS keep playing from there while it is connected.'
-          : 'Only new recordings go to the NAS; recordings already on this server stay here and can still be played. Retention and "delete oldest when full" apply to the NAS while it is connected.'}
+        Backups are checked against the recording before they count. Recordings that are only on the NAS keep playing from there while it is connected.
       </p>
     </div>
   );

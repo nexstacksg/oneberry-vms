@@ -103,11 +103,9 @@ static bool is_backup_role(const nas_config_t *cfg) {
 
 /* Role and backup options: fill defaults, keep values in range. */
 static int validate_options(nas_config_t *cfg, char *err, size_t err_len) {
-    if (cfg->role[0] == '\0') copy_str(cfg->role, sizeof(cfg->role), "main");
-    if (strcmp(cfg->role, "main") != 0 && strcmp(cfg->role, "backup") != 0) {
-        snprintf(err, err_len, "Choose how the NAS is used: recording or backup");
-        return -1;
-    }
+    /* The NAS is used for backup only: recording straight to it made
+       recording depend on the NAS and the network */
+    copy_str(cfg->role, sizeof(cfg->role), "backup");
     if (strcmp(cfg->backup_when, "schedule") != 0) copy_str(cfg->backup_when, sizeof(cfg->backup_when), "realtime");
     if (cfg->schedule_start_hour < 0 || cfg->schedule_start_hour > 23 ||
         cfg->schedule_end_hour < 0 || cfg->schedule_end_hour > 23) {
@@ -234,7 +232,7 @@ static void load_config_file(void) {
         }
     }
     char ignored[64];
-    if (validate_options(&nas_cfg, ignored, sizeof(ignored)) != 0) copy_str(nas_cfg.role, sizeof(nas_cfg.role), "main");
+    validate_options(&nas_cfg, ignored, sizeof(ignored));
     cJSON_Delete(doc);
 }
 
@@ -968,9 +966,17 @@ int nas_storage_init(const char *config_dir) {
     load_config_file();
 
     if (nas_cfg.enabled) {
-        log_info("NAS storage is enabled (%s //%s); connecting before recordings start",
+        /* A NAS set up for recording before (no backup start time yet) is a
+           backup NAS now: back up from now on and keep that in the settings */
+        if (nas_cfg.backup_since <= 0) {
+            nas_cfg.backup_since = time(NULL);
+            save_config_file(&nas_cfg);
+            log_info("NAS storage is now used for backup: cameras record to the local disk and "
+                     "recordings are copied to the NAS");
+        }
+        log_info("NAS backup storage is enabled (%s //%s); connecting",
                  nas_cfg.type, nas_cfg.server);
-        nas_check();  /* recordings start on the NAS if it answers now */
+        nas_check();
     }
 
     pthread_mutex_lock(&monitor_mutex);

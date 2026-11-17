@@ -9,13 +9,12 @@
 /*
  * Network storage (NAS) for recordings, set up from Settings.
  *
- * The share (NFS or SMB) is mounted inside the container at NAS_MOUNT_POINT.
- * Like Nx Witness, the NAS has one of two roles:
- *
- *   main    New recordings go to NAS_MOUNT_POINT/recordings while it is
- *           connected and responding; otherwise to the local storage path.
- *   backup  Recordings are always made on the local disk and copied to
- *           NAS_BACKUP_DIR in the background (see nas_backup.h).
+ * The share (NFS or SMB) is mounted inside the container at NAS_MOUNT_POINT
+ * and used as backup storage, like Nx Witness backup: cameras always record
+ * to the local disk and recordings are copied to NAS_BACKUP_DIR in the
+ * background (see nas_backup.h). Recording straight to the NAS (the old
+ * "main" role, NAS_MOUNT_POINT/recordings) is no longer offered: it made
+ * recording depend on the NAS and the network.
  *
  * Recordings already made keep their paths, so old recordings stay playable.
  *
@@ -38,7 +37,7 @@ typedef struct {
     char username[128];  /* SMB only; empty = guest */
     char password[256];  /* SMB only; never returned by the API */
     char version[16];    /* NFS: 4.1, 4, 3; SMB: 3.0, 2.1, 1.0 */
-    char role[8];        /* "main" (record to the NAS) or "backup" */
+    char role[8];        /* always "backup" */
 
     /* Backup role only */
     char backup_when[12];     /* "realtime" or "schedule" */
